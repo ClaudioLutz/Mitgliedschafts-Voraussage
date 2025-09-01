@@ -117,6 +117,10 @@ CAL_SPLITS = 3  # time-aware folds for calibration
 
 N_JOBS_SEARCH = 1  # avoid worker crashes on huge folds (increase if RAM allows)
 
+# Memory optimization settings
+SAMPLE_TRAINING_DATA = True  # Use stratified sampling for large datasets
+MAX_TRAINING_SAMPLES = 500000  # Maximum samples for training (adjust based on RAM)
+
 
 # --------------------
 # DB connection helper (pyodbc via SQLAlchemy URL)
@@ -198,7 +202,10 @@ modeling AS (
         -- existence: company founded on/before snapshot year
         AND (b.Gruendung_Jahr IS NULL OR b.Gruendung_Jahr <= YEAR(s.snapshot_date))
         -- realistic snapshots: exclude companies deleted/bankrupt before or at snapshot
-        AND (b.DT_LoeschungAusfall IS NULL OR b.DT_LoeschungAusfall > s.snapshot_date)
+        -- Note: 1888-12-31 is used as NULL sentinel value for DT_LoeschungAusfall
+        AND (b.DT_LoeschungAusfall IS NULL 
+             OR b.DT_LoeschungAusfall = '1888-12-31' 
+             OR b.DT_LoeschungAusfall > s.snapshot_date)
 )
 SELECT * FROM modeling;
 """
@@ -255,7 +262,10 @@ WHERE
     (b.Eintritt IS NULL OR b.Eintritt > s.snapshot_date) -- non-members TODAY
     AND (b.Gruendung_Jahr IS NULL OR b.Gruendung_Jahr <= YEAR(s.snapshot_date))
     -- realistic snapshots: exclude companies deleted/bankrupt before or at snapshot
-    AND (b.DT_LoeschungAusfall IS NULL OR b.DT_LoeschungAusfall > s.snapshot_date);
+    -- Note: 1888-12-31 is used as NULL sentinel value for DT_LoeschungAusfall
+    AND (b.DT_LoeschungAusfall IS NULL 
+         OR b.DT_LoeschungAusfall = '1888-12-31' 
+         OR b.DT_LoeschungAusfall > s.snapshot_date);
 """
     log.info("Loading latest snapshot (current prospects) from DB...")
     df = pd.read_sql_query(text(query), engine, parse_dates=["snapshot_date", "Eintritt", "Austritt"])
@@ -374,6 +384,54 @@ def compute_ts_gap_samples(df_train_val: pd.DataFrame, date_col="snapshot_date",
     samples_per_month = len(df_train_val) / max(periods.nunique(), 1)
     gap = int(max(100, min(months_gap * samples_per_month, 2000)))
     return gap
+
+
+def stratified_sample_large_dataset(df: pd.DataFrame, target_col: str, max_samples: int, random_state: int = 42) -> pd.DataFrame:
+    """
+    Stratified sampling for large datasets to preserve class distribution while reducing memory usage.
+    
+    Args:
+        df: Input dataframe
+        target_col: Name of target column
+        max_samples: Maximum number of samples to retain
+        random_state: Random seed for reproducibility
+    
+    Returns:
+        Stratified sampled dataframe
+    """
+    if len(df) <= max_samples:
+        return df.copy()
+    
+    log.info(f"Dataset too large ({len(df):,} samples). Applying stratified sampling to {max_samples:,} samples...")
+    
+    # Calculate sampling ratio
+    sample_ratio = max_samples / len(df)
+    
+    # Group by target and sample from each group proportionally
+    sampled_dfs = []
+    for target_value in df[target_col].unique():
+        group = df[df[target_col] == target_value]
+        group_sample_size = max(1, int(len(group) * sample_ratio))
+        
+        if len(group) <= group_sample_size:
+            sampled_group = group.copy()
+        else:
+            sampled_group = group.sample(n=group_sample_size, random_state=random_state)
+        
+        sampled_dfs.append(sampled_group)
+        log.info(f"  Target={target_value}: {len(group):,} -> {len(sampled_group):,} samples")
+    
+    # Combine sampled groups
+    result = pd.concat(sampled_dfs, ignore_index=True)
+    
+    # Shuffle the final result
+    result = result.sample(frac=1, random_state=random_state).reset_index(drop=True)
+    
+    log.info(f"Stratified sampling complete: {len(df):,} -> {len(result):,} samples")
+    log.info(f"Original target distribution: {df[target_col].value_counts().to_dict()}")
+    log.info(f"Sampled target distribution: {result[target_col].value_counts().to_dict()}")
+    
+    return result
 
 
 # --------------------
@@ -562,6 +620,28 @@ def main():
     X_train_val = pd.concat([df_train_eng, df_val_eng], ignore_index=True)
     y_train_val = pd.concat([df_train["Target"], df_val["Target"]], ignore_index=True)
     feature_cols = [c for c in X_train_val.columns if c not in DROP_COLS]
+    
+    # Memory optimization: Apply stratified sampling if dataset is too large
+    if SAMPLE_TRAINING_DATA and len(X_train_val) > MAX_TRAINING_SAMPLES:
+        # Combine features and target for stratified sampling
+        combined_data = X_train_val.copy()
+        combined_data["Target"] = y_train_val
+        
+        # Apply stratified sampling
+        sampled_data = stratified_sample_large_dataset(
+            df=combined_data, 
+            target_col="Target", 
+            max_samples=MAX_TRAINING_SAMPLES, 
+            random_state=RANDOM_STATE
+        )
+        
+        # Split back into features and target
+        X_train_val = sampled_data[feature_cols]
+        y_train_val = sampled_data["Target"]
+        
+        log.info(f"🎯 Memory-optimized training data: {len(X_train_val):,} samples")
+    else:
+        log.info(f"📊 Using full training dataset: {len(X_train_val):,} samples")
 
     # Multi-tier approach: Known params > Checkpoint > Full search
     if USE_BEST_KNOWN_PARAMS and not FORCE_NEW_SEARCH:
@@ -647,8 +727,9 @@ def main():
         log.info("💾 Checkpoint saved: Future runs will use fast path")
 
     # 9) Time-aware calibration on Train+Val
-    # Compute gap for calibration (if not already computed in search path)
-    cal_gap = max(50, compute_ts_gap_samples(X_train_val, months_gap=2) // 2)
+    # Compute gap for calibration using original unsampled data for accurate time calculation
+    original_combined = pd.concat([df_train_eng, df_val_eng], ignore_index=True)
+    cal_gap = max(50, compute_ts_gap_samples(original_combined, months_gap=2) // 2)
     cal_tscv = TimeSeriesSplit(n_splits=CAL_SPLITS, gap=cal_gap)
     
     # Updated API: sklearn >= 1.6 uses 'estimator=' instead of 'base_estimator='

@@ -77,9 +77,9 @@ class FeatureEngineeringTransformer:
             X_out['PLZ2'] = plz_str.str[:2]
             X_out['PLZ3'] = plz_str.str[:3]
             
-            # Handle NaN/invalid values
-            X_out['PLZ2'] = X_out['PLZ2'].replace('na', np.nan)
-            X_out['PLZ3'] = X_out['PLZ3'].replace('na', np.nan)
+            # Keep NaN/invalid values as strings to avoid mixed types
+            X_out['PLZ2'] = X_out['PLZ2'].replace('na', 'missing')
+            X_out['PLZ3'] = X_out['PLZ3'].replace('na', 'missing')
         
         # 3. Apply log transforms to skewed features
         skewed_cols = ['MitarbeiterBestand', 'Umsatz']
@@ -125,9 +125,9 @@ def add_plz_grouping(X):
         X_out['PLZ2'] = plz_str.str[:2]
         X_out['PLZ3'] = plz_str.str[:3]
         
-        # Handle NaN/invalid values
-        X_out['PLZ2'] = X_out['PLZ2'].replace('na', np.nan)
-        X_out['PLZ3'] = X_out['PLZ3'].replace('na', np.nan)
+        # Keep NaN/invalid values as strings to avoid mixed types
+        X_out['PLZ2'] = X_out['PLZ2'].replace('na', 'missing')
+        X_out['PLZ3'] = X_out['PLZ3'].replace('na', 'missing')
     
     return X_out
 
@@ -194,6 +194,7 @@ DROP_COLS = [
     'CrefoID', 'Name_Firma',           # Identifiers
     'Eintritt', 'Austritt',            # Pure leakage (membership outcomes)
     'snapshot_date', 'Target',         # Leakage/target
+    'DT_LoeschungAusfall',             # Used for snapshot filtering only, not as feature
     'BrancheText_02', 'BrancheText_04', 'BrancheText_06',  # Redundant with codes
     'MitarbeiterBestandKategorie',     # Redundant with Order version
     'UmsatzKategorie'                  # Redundant with Order version
@@ -215,10 +216,36 @@ ordinal_pipeline = Pipeline([
     ('imputer', SimpleImputer(strategy='median'))
 ])
 
-# Low-cardinality categorical preprocessing  
+# Custom transformer to ensure categorical data is consistently string type
+class CategoricalTypeConverter:
+    """Ensure all categorical columns are string type to avoid mixed type errors."""
+    
+    def fit(self, X, y=None):
+        return self
+    
+    def transform(self, X):
+        """Convert all values to string type and handle NaN properly."""
+        X_out = X.copy() if hasattr(X, 'copy') else X
+        
+        # Convert to DataFrame if it's not already
+        if not hasattr(X_out, 'columns'):
+            import pandas as pd
+            X_out = pd.DataFrame(X_out)
+        
+        # Convert all columns to string, handling NaN values
+        for col in X_out.columns:
+            X_out[col] = X_out[col].astype(str).replace('nan', 'missing')
+        
+        return X_out
+    
+    def fit_transform(self, X, y=None):
+        return self.fit(X, y).transform(X)
+
+# Low-cardinality categorical preprocessing with type conversion
 try:
     # Handle sklearn version differences
     low_card_pipeline = Pipeline([
+        ('type_converter', CategoricalTypeConverter()),
         ('imputer', SimpleImputer(strategy='constant', fill_value='missing')),
         ('onehot', OneHotEncoder(
             handle_unknown='ignore',
@@ -230,12 +257,14 @@ try:
 except TypeError:
     # Fallback for older sklearn versions
     low_card_pipeline = Pipeline([
+        ('type_converter', CategoricalTypeConverter()),
         ('imputer', SimpleImputer(strategy='constant', fill_value='missing')),
         ('onehot', OneHotEncoder(handle_unknown='ignore', sparse=False))
     ])
 
-# High-cardinality categorical preprocessing (Target Encoding with cross-fitting)
+# High-cardinality categorical preprocessing with type conversion
 high_card_pipeline = Pipeline([
+    ('type_converter', CategoricalTypeConverter()),
     ('imputer', SimpleImputer(strategy='constant', fill_value='missing')),
     ('target_encoder', TargetEncoder(
         smooth='auto',          # Automatic smoothing based on category frequency
