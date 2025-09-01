@@ -52,6 +52,9 @@ except Exception:
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import HistGradientBoostingClassifier
 
+# Import new Lead-Gen preprocessor
+from column_transformer_lead_gen import create_lead_gen_preprocessor, DROP_COLS, validate_preprocessor
+
 # Imbalance handling
 USE_CLASS_WEIGHT = Version(sklearn_version) >= Version("1.5")
 try:
@@ -173,7 +176,8 @@ base AS (
         a.BrancheText_04,
         -- membership table fields
         a.Eintritt,
-        a.Austritt
+        a.Austritt,
+        a.DT_LoeschungAusfall
     FROM {DATABASE}.{SCHEMA}.MitgliederSegmentierung a
 ),
 modeling AS (
@@ -193,6 +197,8 @@ modeling AS (
         AND (b.Eintritt IS NULL OR b.Eintritt >= s.snapshot_date)
         -- existence: company founded on/before snapshot year
         AND (b.Gruendung_Jahr IS NULL OR b.Gruendung_Jahr <= YEAR(s.snapshot_date))
+        -- realistic snapshots: exclude companies deleted/bankrupt before or at snapshot
+        AND (b.DT_LoeschungAusfall IS NULL OR b.DT_LoeschungAusfall > s.snapshot_date)
 )
 SELECT * FROM modeling;
 """
@@ -236,7 +242,8 @@ base AS (
         a.BrancheText_02,
         a.BrancheText_04,
         a.Eintritt,
-        a.Austritt
+        a.Austritt,
+        a.DT_LoeschungAusfall
     FROM {DATABASE}.{SCHEMA}.MitgliederSegmentierung a
 )
 SELECT
@@ -246,7 +253,9 @@ FROM base b
 CROSS JOIN snapshot_today s
 WHERE
     (b.Eintritt IS NULL OR b.Eintritt > s.snapshot_date) -- non-members TODAY
-    AND (b.Gruendung_Jahr IS NULL OR b.Gruendung_Jahr <= YEAR(s.snapshot_date));
+    AND (b.Gruendung_Jahr IS NULL OR b.Gruendung_Jahr <= YEAR(s.snapshot_date))
+    -- realistic snapshots: exclude companies deleted/bankrupt before or at snapshot
+    AND (b.DT_LoeschungAusfall IS NULL OR b.DT_LoeschungAusfall > s.snapshot_date);
 """
     log.info("Loading latest snapshot (current prospects) from DB...")
     df = pd.read_sql_query(text(query), engine, parse_dates=["snapshot_date", "Eintritt", "Austritt"])
@@ -257,7 +266,7 @@ WHERE
 # Feature utilities
 # --------------------
 LEAKAGE_COLS = {
-    "Target", "Eintritt", "Austritt", "snapshot_date"
+    "Target", "Eintritt", "Austritt", "snapshot_date", "DT_LoeschungAusfall"
 }
 
 def auto_column_groups(df: pd.DataFrame,
@@ -290,9 +299,9 @@ def auto_column_groups(df: pd.DataFrame,
 
 
 def temporal_feature_engineer(df: pd.DataFrame) -> pd.DataFrame:
-    """Add simple temporal/structural features using snapshot_date & Gruendung_Jahr."""
+    """Add Company_Age_Years feature. Other feature engineering handled by Lead-Gen preprocessor."""
     out = df.copy()
-    # Company age in years at snapshot
+    # Company age in years at snapshot (required by Lead-Gen ColumnTransformer)
     if "Gruendung_Jahr" in out.columns:
         snap_year = out["snapshot_date"].dt.year
         out["Company_Age_Years"] = (
@@ -300,10 +309,6 @@ def temporal_feature_engineer(df: pd.DataFrame) -> pd.DataFrame:
         ).clip(lower=0)
     else:
         out["Company_Age_Years"] = 0
-
-    # Example: Active flag from Umsatz/Mitarbeiter (simple heuristics; adjust as needed)
-    out["Has_Employees"] = (out.get("MitarbeiterBestand", pd.Series(0)).fillna(0) > 0).astype(int)
-    out["Has_Revenue"]   = (out.get("Umsatz", pd.Series(0)).fillna(0) > 0).astype(int)
 
     return out
 
@@ -506,47 +511,19 @@ def main():
     df_test_eng  = temporal_feature_engineer(df_test)
     df_curr_eng  = temporal_feature_engineer(df_current)
 
-    # 4) Column groups (auto)
-    num_cols, low_cat_cols, high_cat_cols = auto_column_groups(df_train_eng)
-
-    # Defensive: ensure lists are not empty
-    if not num_cols:
-        num_cols = []
-    if not low_cat_cols and not high_cat_cols:
-        # If everything is numeric (unlikely), we still proceed
-        pass
-
-    # 5) Preprocessor
-    num_pipe = Pipeline([
-        ("impute", SimpleImputer(strategy="median")),
-    ])
-
-    # Version-safe OneHotEncoder
+    # 4) Optional: Validate preprocessor on sample data
     try:
-        ohe = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-        log.info("Using OneHotEncoder(sparse_output=False)")
-    except TypeError:
-        ohe = OneHotEncoder(handle_unknown="ignore", sparse=False)
-        log.info("Using OneHotEncoder(sparse=False)")
+        validation_results = validate_preprocessor(df_train_eng.head(1000))
+        log.info(f"✅ Preprocessor validation successful!")
+        log.info(f"   Features created: {validation_results['n_features']}")
+        log.info(f"   Missing indicators: {len(validation_results['missing_indicators_added'])}")
+        log.info(f"   PLZ groupings: {len(validation_results['plz_groupings_added'])}")
+    except Exception as e:
+        log.warning(f"⚠️  Preprocessor validation failed: {e}")
 
-    low_cat_pipe = Pipeline([
-        ("ohe", ohe)
-    ])
-
-    # TargetEncoder inside pipeline (internal cross-fitting avoids leakage)
-    high_cat_pipe = Pipeline([
-        ("te", TargetEncoder())
-    ])
-
-    pre = ColumnTransformer(
-        transformers=[
-            ("num", num_pipe, num_cols),
-            ("lowcat", low_cat_pipe, low_cat_cols),
-            ("highcat", high_cat_pipe, high_cat_cols),
-        ],
-        remainder="drop",
-        sparse_threshold=0.3  # let it be sparse if dominated by OHE
-    )
+    # 5) Create lead-gen specific preprocessor
+    pre = create_lead_gen_preprocessor()
+    log.info("🔧 Using Lead-Gen ColumnTransformer with engineered features")
 
     # 6) Estimator & imbalance strategy
     #    Choose ONE: class_weight if supported (sklearn >= 1.5), else SMOTE
@@ -584,7 +561,7 @@ def main():
     # Train+Val set for CV; hold out Test by date
     X_train_val = pd.concat([df_train_eng, df_val_eng], ignore_index=True)
     y_train_val = pd.concat([df_train["Target"], df_val["Target"]], ignore_index=True)
-    feature_cols = [c for c in X_train_val.columns if c not in LEAKAGE_COLS]
+    feature_cols = [c for c in X_train_val.columns if c not in DROP_COLS]
 
     # Multi-tier approach: Known params > Checkpoint > Full search
     if USE_BEST_KNOWN_PARAMS and not FORCE_NEW_SEARCH:
@@ -736,10 +713,10 @@ def main():
     scored.to_csv(out_csv, index=False)
     log.info(f"Saved ranked leads to {out_csv}")
 
-    # 12) (Optional) Write to SQL table for BI/CRM pickup
-    # scored.to_sql("lead_generation_rankings", con=engine, schema=SCHEMA,
-    #               if_exists="replace", index=False)
-    # log.info("Exported ranked leads to SQL (mitgliederstatistik.lead_generation_rankings)")
+    #12) (Optional) Write to SQL table for BI/CRM pickup
+    scored.to_sql("lead_generation_rankings", con=engine, schema=SCHEMA,
+                  if_exists="replace", index=False)
+    log.info("Exported ranked leads to SQL (mitgliederstatistik.lead_generation_rankings)")
 
     log.info("=== Done ===")
 
