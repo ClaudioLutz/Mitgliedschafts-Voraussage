@@ -1,3 +1,5 @@
+
+
 # training_lead_generation_model_refactored.py
 # -------------------------------------------
 # Lead-generation oriented, leakage-safe training with time-aware CV & calibration.
@@ -119,7 +121,9 @@ N_JOBS_SEARCH = 1  # avoid worker crashes on huge folds (increase if RAM allows)
 
 # Memory optimization settings
 SAMPLE_TRAINING_DATA = True  # Use stratified sampling for large datasets
-MAX_TRAINING_SAMPLES = 500000  # Maximum samples for training (adjust based on RAM)
+MAX_TRAINING_SAMPLES = 1500000  # Maximum samples for training (increased for better stratification)
+USE_BUSINESS_LOGIC_SAMPLING = True  # Use advanced business-logic sampling
+PRESERVE_RARE_POSITIVES = True  # Preserve rare but valuable positive cases
 
 
 # --------------------
@@ -269,8 +273,9 @@ WHERE
 """
     log.info("Loading latest snapshot (current prospects) from DB...")
     df = pd.read_sql_query(text(query), engine, parse_dates=["snapshot_date", "Eintritt", "Austritt"])
-    return df
-
+    print("lates snapshot data:")
+    
+    return df    
 
 # --------------------
 # Feature utilities
@@ -388,7 +393,8 @@ def compute_ts_gap_samples(df_train_val: pd.DataFrame, date_col="snapshot_date",
 
 def stratified_sample_large_dataset(df: pd.DataFrame, target_col: str, max_samples: int, random_state: int = 42) -> pd.DataFrame:
     """
-    Stratified sampling for large datasets to preserve class distribution while reducing memory usage.
+    Enhanced multi-dimensional stratified sampling for large datasets.
+    Preserves distributions across multiple key dimensions simultaneously.
     
     Args:
         df: Input dataframe
@@ -397,41 +403,227 @@ def stratified_sample_large_dataset(df: pd.DataFrame, target_col: str, max_sampl
         random_state: Random seed for reproducibility
     
     Returns:
-        Stratified sampled dataframe
+        Multi-dimensionally stratified sampled dataframe
     """
     if len(df) <= max_samples:
         return df.copy()
     
-    log.info(f"Dataset too large ({len(df):,} samples). Applying stratified sampling to {max_samples:,} samples...")
+    log.info(f"Dataset too large ({len(df):,} samples). Applying enhanced stratified sampling to {max_samples:,} samples...")
     
-    # Calculate sampling ratio
+    # Define stratification strategy based on business importance
+    stratification_features = []
+    
+    # 1. Always stratify by target (most important)
+    stratification_features.append(target_col)
+    
+    # 2. Geographic stratification (preserve regional representation)
+    if 'Kanton' in df.columns:
+        # Group smaller cantons together to avoid over-fragmentation
+        major_cantons = ['ZH', 'BE', 'VD', 'GE', 'AG', 'SG', 'TI', 'VS', 'LU', 'ZG']
+        df_temp = df.copy()
+        df_temp['Kanton_Grouped'] = df_temp['Kanton'].apply(
+            lambda x: x if x in major_cantons else 'OTHER'
+        )
+        stratification_features.append('Kanton_Grouped')
+        log.info("✅ Geographic stratification enabled (major cantons + OTHER)")
+    
+    # 3. Company size stratification (critical business dimension)
+    if 'GroessenKategorie' in df.columns:
+        stratification_features.append('GroessenKategorie')
+        log.info("✅ Company size stratification enabled")
+    
+    # 4. Temporal stratification (preserve time-series properties)
+    if 'snapshot_date' in df.columns:
+        df_temp['snapshot_year'] = df['snapshot_date'].dt.year
+        stratification_features.append('snapshot_year')
+        log.info("✅ Temporal stratification enabled")
+    
+    # 5. Legal form stratification (different business types)
+    if 'Rechtsform' in df.columns:
+        # Group less common legal forms to avoid over-fragmentation
+        major_forms = ['Einzelunternehmen', 'GmbH', 'Aktiengesellschaft', 'Verein','Genossenschaft']
+        df_temp['Rechtsform_Grouped'] = df['Rechtsform'].apply(
+            lambda x: x if x in major_forms else 'OTHER'
+        )
+        stratification_features.append('Rechtsform_Grouped')
+        log.info("✅ Legal form stratification enabled")
+    
+    log.info(f"Stratifying across {len(stratification_features)} dimensions: {stratification_features}")
+    
+    # Create stratification groups
+    if len(stratification_features) == 1:
+        # Simple stratification (fallback)
+        df_temp['strat_group'] = df_temp[stratification_features[0]].astype(str)
+    else:
+        # Multi-dimensional stratification
+        df_temp['strat_group'] = df_temp[stratification_features].astype(str).agg('|'.join, axis=1)
+    
+    # Calculate sampling strategy
+    group_counts = df_temp['strat_group'].value_counts()
+    total_groups = len(group_counts)
     sample_ratio = max_samples / len(df)
     
-    # Group by target and sample from each group proportionally
+    log.info(f"Created {total_groups:,} stratification groups")
+    log.info(f"Base sampling ratio: {sample_ratio:.4f}")
+    
+    # Enhanced sampling with minimum guarantees
     sampled_dfs = []
-    for target_value in df[target_col].unique():
-        group = df[df[target_col] == target_value]
-        group_sample_size = max(1, int(len(group) * sample_ratio))
+    min_samples_per_group = max(1, int(max_samples / total_groups * 0.1))  # At least 10% of equal allocation
+    
+    for group_id, group_size in group_counts.items():
+        group_df = df_temp[df_temp['strat_group'] == group_id]
         
-        if len(group) <= group_sample_size:
-            sampled_group = group.copy()
+        # Calculate target sample size with minimum guarantee
+        target_samples = max(min_samples_per_group, int(group_size * sample_ratio))
+        
+        # Don't over-sample small groups
+        actual_samples = min(target_samples, len(group_df))
+        
+        if actual_samples >= len(group_df):
+            sampled_group = group_df.copy()
         else:
-            sampled_group = group.sample(n=group_sample_size, random_state=random_state)
+            sampled_group = group_df.sample(n=actual_samples, random_state=random_state)
         
         sampled_dfs.append(sampled_group)
-        log.info(f"  Target={target_value}: {len(group):,} -> {len(sampled_group):,} samples")
     
-    # Combine sampled groups
+    # Combine all sampled groups
     result = pd.concat(sampled_dfs, ignore_index=True)
     
-    # Shuffle the final result
+    # If we're over the target, do proportional reduction
+    if len(result) > max_samples:
+        log.info(f"Initial sample ({len(result):,}) exceeds target. Applying proportional reduction...")
+        reduction_ratio = max_samples / len(result)
+        
+        final_dfs = []
+        for group_id in result['strat_group'].unique():
+            group_df = result[result['strat_group'] == group_id]
+            reduced_size = max(1, int(len(group_df) * reduction_ratio))
+            
+            if reduced_size >= len(group_df):
+                final_group = group_df.copy()
+            else:
+                final_group = group_df.sample(n=reduced_size, random_state=random_state)
+            
+            final_dfs.append(final_group)
+        
+        result = pd.concat(final_dfs, ignore_index=True)
+    
+    # Remove temporary columns and shuffle
+    columns_to_drop = ['strat_group']
+    if 'Kanton_Grouped' in result.columns:
+        columns_to_drop.append('Kanton_Grouped')
+    if 'Rechtsform_Grouped' in result.columns:
+        columns_to_drop.append('Rechtsform_Grouped')
+    if 'snapshot_year' in result.columns:
+        columns_to_drop.append('snapshot_year')
+    
+    result = result.drop(columns=columns_to_drop, errors='ignore')
     result = result.sample(frac=1, random_state=random_state).reset_index(drop=True)
     
-    log.info(f"Stratified sampling complete: {len(df):,} -> {len(result):,} samples")
-    log.info(f"Original target distribution: {df[target_col].value_counts().to_dict()}")
-    log.info(f"Sampled target distribution: {result[target_col].value_counts().to_dict()}")
+    # Enhanced reporting
+    log.info(f"✅ Enhanced stratified sampling complete: {len(df):,} -> {len(result):,} samples")
+    log.info(f"📊 Target distribution preservation:")
+    
+    orig_target_dist = df[target_col].value_counts(normalize=True).sort_index()
+    sampled_target_dist = result[target_col].value_counts(normalize=True).sort_index()
+    
+    for target_val in orig_target_dist.index:
+        orig_pct = orig_target_dist.get(target_val, 0) * 100
+        sampled_pct = sampled_target_dist.get(target_val, 0) * 100
+        difference = abs(orig_pct - sampled_pct)
+        log.info(f"  Target={target_val}: {orig_pct:.2f}% -> {sampled_pct:.2f}% (Δ={difference:.2f}%)")
+    
+    # Report on other key dimensions
+    if 'Kanton' in df.columns and 'Kanton' in result.columns:
+        log.info("📍 Geographic distribution preservation (top cantons):")
+        orig_geo = df['Kanton'].value_counts(normalize=True).head(5)
+        sampled_geo = result['Kanton'].value_counts(normalize=True).head(5)
+        for canton in orig_geo.index:
+            orig_pct = orig_geo.get(canton, 0) * 100
+            sampled_pct = sampled_geo.get(canton, 0) * 100
+            log.info(f"  {canton}: {orig_pct:.1f}% -> {sampled_pct:.1f}%")
+    
+    if 'GroessenKategorie' in df.columns and 'GroessenKategorie' in result.columns:
+        log.info("🏢 Company size distribution preservation:")
+        orig_size = df['GroessenKategorie'].value_counts(normalize=True)
+        sampled_size = result['GroessenKategorie'].value_counts(normalize=True)
+        for size_cat in ['MICRO', 'KLEIN', 'MITTEL', 'GROSS']:
+            if size_cat in orig_size.index:
+                orig_pct = orig_size.get(size_cat, 0) * 100
+                sampled_pct = sampled_size.get(size_cat, 0) * 100
+                log.info(f"  {size_cat}: {orig_pct:.1f}% -> {sampled_pct:.1f}%")
     
     return result
+
+
+def advanced_stratified_sample_with_business_logic(df: pd.DataFrame, target_col: str, max_samples: int, 
+                                                  random_state: int = 42, 
+                                                  preserve_rare_positives: bool = True) -> pd.DataFrame:
+    """
+    Advanced stratified sampling with business-specific logic for lead generation.
+    
+    Args:
+        df: Input dataframe
+        target_col: Name of target column
+        max_samples: Maximum number of samples to retain
+        random_state: Random seed for reproducibility
+        preserve_rare_positives: Whether to ensure rare positive cases are preserved
+    
+    Returns:
+        Business-logic enhanced stratified sampled dataframe
+    """
+    if len(df) <= max_samples:
+        return df.copy()
+    
+    log.info(f"🎯 Applying business-logic enhanced sampling to {max_samples:,} samples...")
+    
+    # Step 1: Identify and preserve rare but valuable cases
+    rare_cases = pd.DataFrame()
+    
+    if preserve_rare_positives and target_col in df.columns:
+        # Preserve all positive cases from underrepresented segments
+        positive_cases = df[df[target_col] == 1]
+        
+        if len(positive_cases) > 0:
+            # Identify rare positive segments (e.g., large companies that converted)
+            if 'GroessenKategorie' in df.columns:
+                large_company_positives = positive_cases[
+                    positive_cases['GroessenKategorie'].isin(['GROSS', 'SEHR GROSS', 'MITTEL'])
+                ]
+                if len(large_company_positives) > 0:
+                    rare_cases = pd.concat([rare_cases, large_company_positives])
+                    log.info(f"🔸 Preserved {len(large_company_positives)} large company conversions")
+            
+            # Preserve positive cases from smaller cantons
+            if 'Kanton' in df.columns:
+                small_canton_positives = positive_cases[
+                    ~positive_cases['Kanton'].isin(['ZH', 'BE', 'VD', 'GE', 'AG'])
+                ]
+                small_canton_sample = small_canton_positives.head(min(1000, len(small_canton_positives)))
+                rare_cases = pd.concat([rare_cases, small_canton_sample])
+                log.info(f"🔸 Preserved {len(small_canton_sample)} conversions from smaller regions")
+    
+    # Step 2: Apply main stratified sampling to remaining data
+    remaining_df = df.drop(rare_cases.index) if len(rare_cases) > 0 else df
+    remaining_budget = max_samples - len(rare_cases)
+    
+    if remaining_budget > 0:
+        main_sample = stratified_sample_large_dataset(
+            remaining_df, target_col, remaining_budget, random_state
+        )
+    else:
+        main_sample = pd.DataFrame()
+    
+    # Step 3: Combine rare cases with main sample
+    if len(rare_cases) > 0:
+        final_result = pd.concat([rare_cases, main_sample], ignore_index=True)
+        final_result = final_result.sample(frac=1, random_state=random_state).reset_index(drop=True)
+        log.info(f"🎯 Business-logic sampling complete: {len(rare_cases)} rare + {len(main_sample)} stratified = {len(final_result)} total")
+    else:
+        final_result = main_sample
+        log.info(f"🎯 Business-logic sampling complete: {len(final_result)} samples (no rare cases found)")
+    
+    return final_result
 
 
 # --------------------
@@ -534,6 +726,17 @@ def checkpoint_exists():
     return pipeline is not None and params is not None
 
 
+def main():
+    log.info("=== Starting Lead Generation Model Training (refactored) ===")
+    engine = make_engine(SERVER, DATABASE)
+    log.info("DB connection OK")
+
+    # 1) Load modeling (complete labels) + current prospects (latest snapshot)
+    df_model = load_modeling_data(engine, horizon_months=HORIZON_MONTHS)
+    log.info(f"Modeling rows: {len(df_model):,}, snapshots: {df_model['snapshot_date'].nunique()} "
+             f"from {df_model['snapshot_date'].min()} to {df_model['snapshot_date'].max()}")
+    log.info(f"Overall conversion rate (modeling): {df_model['Target'].mean():.4f}")
+
 # --------------------
 # Main
 # --------------------
@@ -621,19 +824,30 @@ def main():
     y_train_val = pd.concat([df_train["Target"], df_val["Target"]], ignore_index=True)
     feature_cols = [c for c in X_train_val.columns if c not in DROP_COLS]
     
-    # Memory optimization: Apply stratified sampling if dataset is too large
+    # Memory optimization: Apply advanced stratified sampling if dataset is too large
     if SAMPLE_TRAINING_DATA and len(X_train_val) > MAX_TRAINING_SAMPLES:
         # Combine features and target for stratified sampling
         combined_data = X_train_val.copy()
         combined_data["Target"] = y_train_val
         
-        # Apply stratified sampling
-        sampled_data = stratified_sample_large_dataset(
-            df=combined_data, 
-            target_col="Target", 
-            max_samples=MAX_TRAINING_SAMPLES, 
-            random_state=RANDOM_STATE
-        )
+        # Choose sampling strategy based on configuration
+        if USE_BUSINESS_LOGIC_SAMPLING:
+            log.info("🎯 Using business-logic enhanced stratified sampling...")
+            sampled_data = advanced_stratified_sample_with_business_logic(
+                df=combined_data, 
+                target_col="Target", 
+                max_samples=MAX_TRAINING_SAMPLES, 
+                random_state=RANDOM_STATE,
+                preserve_rare_positives=PRESERVE_RARE_POSITIVES
+            )
+        else:
+            log.info("📊 Using multi-dimensional stratified sampling...")
+            sampled_data = stratified_sample_large_dataset(
+                df=combined_data, 
+                target_col="Target", 
+                max_samples=MAX_TRAINING_SAMPLES, 
+                random_state=RANDOM_STATE
+            )
         
         # Split back into features and target
         X_train_val = sampled_data[feature_cols]

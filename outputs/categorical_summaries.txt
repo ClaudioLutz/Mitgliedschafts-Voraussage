@@ -1,0 +1,253 @@
+
+NAME_FIRMA
+==========
+Unique values: 1242670
+Top 20 categories:
+  1. Gemeindeverwaltung                                       60 (  0.0%)
+  2. Schulgemeinde                                            55 (  0.0%)
+  3. Röm.- katholische Kirchgemeinde                          49 (  0.0%)
+  4. Administration communale                                 39 (  0.0%)
+  5. Peter Müller                                             27 (  0.0%)
+  6. Viehversicherungskasse                                   26 (  0.0%)
+  7. Katholische Kirchgemeinde                                25 (  0.0%)
+  8. Martin Müller                                            25 (  0.0%)
+  9. Peter Meier                                              24 (  0.0%)
+ 10. Peter Schmid                                             23 (  0.0%)
+ 11. Christian Müller                                         21 (  0.0%)
+ 12. Jehovas Zeugen                                           20 (  0.0%)
+ 13. Daniel Müller                                            19 (  0.0%)
+ 14. Thomas Keller                                            19 (  0.0%)
+ 15. Thomas Müller                                            19 (  0.0%)
+ 16. Markus Müller                                            19 (  0.0%)
+ 17. Martin Meier                                             18 (  0.0%)
+ 18. Thomas Gerber                                            18 (  0.0%)
+ 19. Missione Cattolica Italiana                              18 (  0.0%)
+ 20. Martin Schmid                                            18 (  0.0%)
+
+PLZ
+===
+Unique values: 3374
+Top 20 categories:
+  1. 6300                                                 20,523 (  1.6%)
+  2. 6900                                                 16,954 (  1.3%)
+  3. 9490                                                 11,288 (  0.9%)
+  4. 6340                                                  9,682 (  0.8%)
+  5. 8001                                                  9,480 (  0.8%)
+  6. 1204                                                  9,218 (  0.7%)
+  7. 8008                                                  8,448 (  0.7%)
+  8. 1201                                                  7,949 (  0.6%)
+  9. 9000                                                  7,814 (  0.6%)
+ 10. 1205                                                  7,726 (  0.6%)
+ 11. 8002                                                  7,711 (  0.6%)
+ 12. 1700                                                  7,579 (  0.6%)
+ 13. 8004                                                  7,500 (  0.6%)
+ 14. 1207                                                  7,213 (  0.6%)
+ 15. 1227                                                  7,211 (  0.6%)
+ 16. 8400                                                  6,826 (  0.5%)
+ 17. 2000                                                  6,701 (  0.5%)
+ 18. 1950                                                  6,581 (  0.5%)
+ 19. 1003                                                  6,140 (  0.5%)
+ 20. 7000                                                  5,770 (  0.5%)
+
+KANTON
+======
+Unique values: 28
+Top 20 categories:
+  1. ZH                                                  214,316 ( 17.0%)
+  2. BE                                                  129,192 ( 10.2%)
+  3. VD                                                  114,482 (  9.1%)
+  4. GE                                                   85,205 (  6.7%)
+  5. AG                                                   77,738 (  6.2%)
+  6. SG                                                   67,726 (  5.4%)
+  7. TI                                                   65,603 (  5.2%)
+  8. VS                                                   57,932 (  4.6%)
+  9. LU                                                   55,878 (  4.4%)
+ 10. ZG                                                   47,720 (  3.8%)
+ 11. FR                                                   43,685 (  3.5%)
+ 12. TG                                                   38,116 (  3.0%)
+ 13. GR                                                   33,053 (  2.6%)
+ 14. BL                                                   32,589 (  2.6%)
+ 15. BS                                                   31,145 (  2.5%)
+ 16. SO                                                   30,948 (  2.5%)
+ 17. SZ                                                   29,885 (  2.4%)
+ 18. NE                                                   25,283 (  2.0%)
+ 19. FL                                                   19,683 (  1.6%)
+ 20. JU                                                   12,272 (  1.0%)
+
+RECHTSFORM
+==========
+Unique values: 16
+Top 20 categories:
+  1. Einzelunternehmen                                   553,730 ( 43.9%)
+  2. GmbH                                                279,139 ( 22.1%)
+  3. Aktiengesellschaft                                  252,822 ( 20.0%)
+  4. Verein                                               67,261 (  5.3%)
+  5. Einfache Gesellschaft                                23,037 (  1.8%)
+  6. Stiftung                                             21,512 (  1.7%)
+  7. Zweigniederl. ausländ.Gesellsch.                     19,804 (  1.6%)
+  8. Institut des öffentl. Rechts                         16,331 (  1.3%)
+  9. Kollektivgesellschaft                                11,107 (  0.9%)
+ 10. Genossenschaft                                        7,850 (  0.6%)
+ 11. Anstalt FL                                            6,918 (  0.5%)
+ 12. Treuhänderschaft/Treuunternehmen                      1,752 (  0.1%)
+ 13. Kommanditgesellschaft                                 1,058 (  0.1%)
+ 14. Kommandit Aktiengesellschaft                             14 (  0.0%)
+ 15. Europäische Gesellschaft                                  6 (  0.0%)
+ 16. Ausländische Rechtsform                                   1 (  0.0%)
+
+BRANCHETEXT_06
+==============
+Unique values: 790
+Top 20 categories:
+  1. Unternehmensberatung                                 46,456 (  3.7%)
+  2. Investmentgesellschaften                             26,173 (  2.1%)
+  3. Restaurants, Imbissstuben, Tea-Rooms und Gelaterias   24,079 (  1.9%)
+  4. Kauf und Verkauf von eigenen Grundstücken, Gebäuden und Wohnungen   23,885 (  1.9%)
+  5. Sonstige Aktivitäten der nicht-ärztlichen Medizinalberufe   23,197 (  1.8%)
+  6. Gemischte Landwirtschaft                             22,509 (  1.8%)
+  7. Sonstige Interessenvertretungen und Vereinigungen a. n. g.   22,459 (  1.8%)
+  8. Haltung von Milchkühen                               21,777 (  1.7%)
+  9. Wirtschaftsprüfung und Steuerberatung, Buchführung, Treuhandgesellschaften   20,503 (  1.6%)
+ 10. Verwaltung von Grundstücken, Gebäuden und Wohnungen für Dritte   20,289 (  1.6%)
+ 11. Programmierungstätigkeiten                           19,693 (  1.6%)
+ 12. Architekturbüros                                     19,580 (  1.6%)
+ 13. Coiffeursalons                                       18,583 (  1.5%)
+ 14. Advokatur-, Notariatsbüros                           18,274 (  1.4%)
+ 15. Facharztpraxen                                       16,755 (  1.3%)
+ 16. Kosmetiksalons                                       16,487 (  1.3%)
+ 17. Erbringung von Beratungsleistungen auf dem Gebiet der Informationstechnologie   13,675 (  1.1%)
+ 18. Physiotherapie                                       13,214 (  1.0%)
+ 19. Erbringung von sonstigen Dienstleistungen a. n. g.   12,914 (  1.0%)
+ 20. Andere Holdinggesellschaften                         12,648 (  1.0%)
+
+MITARBEITERBESTANDKATEGORIE
+===========================
+Unique values: 15
+Top 20 categories:
+  1. 1                                                   669,330 ( 53.0%)
+  2. 2-4                                                 261,447 ( 20.7%)
+  3. 5-9                                                 173,459 ( 13.7%)
+  4. 10-24                                                52,046 (  4.1%)
+  5. 0                                                    31,872 (  2.5%)
+  6. 25-49                                                 6,050 (  0.5%)
+  7. 50-149                                                4,571 (  0.4%)
+  8. 150-249                                                 880 (  0.1%)
+  9. 250-499                                                 675 (  0.1%)
+ 10. 500-999                                                 344 (  0.0%)
+ 11. 1000-4999                                               281 (  0.0%)
+ 12. 0-9 (OptingOut)                                         139 (  0.0%)
+ 13. Unbekannt                                               123 (  0.0%)
+ 14. >= 10000                                                 75 (  0.0%)
+ 15. 5000-9999                                                48 (  0.0%)
+
+UMSATZKATEGORIE
+===============
+Unique values: 14
+Top 20 categories:
+  1. 1 - 199'999                                         613,284 ( 48.6%)
+  2. 200'000 - 999'999                                   287,059 ( 22.7%)
+  3. 1 Mio. - < 2 Mio.                                   116,542 (  9.2%)
+  4. 2 Mio. - < 5 Mio.                                    82,896 (  6.6%)
+  5. 0                                                    76,166 (  6.0%)
+  6. 5 Mio. - < 10 Mio.                                   14,381 (  1.1%)
+  7. 10 Mio. - < 30 Mio.                                   6,662 (  0.5%)
+  8. 30 Mio. - < 50 Mio.                                   1,307 (  0.1%)
+  9. 50 Mio. - < 100 Mio.                                    921 (  0.1%)
+ 10. Unbekannt                                               770 (  0.1%)
+ 11. 100 Mio. - < 200 Mio.                                   534 (  0.0%)
+ 12. 200 Mio. - < 1 Mia.                                     512 (  0.0%)
+ 13. >= 2 Mia.                                               207 (  0.0%)
+ 14. 1 Mia. - < 2 Mia.                                        99 (  0.0%)
+
+ORT
+===
+Unique values: 4770
+Top 20 categories:
+  1. Zürich                                               84,251 (  6.7%)
+  2. Genève                                               47,024 (  3.7%)
+  3. Basel                                                29,059 (  2.3%)
+  4. Lausanne                                             23,465 (  1.9%)
+  5. Bern                                                 22,719 (  1.8%)
+  6. Zug                                                  20,666 (  1.6%)
+  7. Luzern                                               14,998 (  1.2%)
+  8. Lugano                                               14,739 (  1.2%)
+  9. Winterthur                                           12,775 (  1.0%)
+ 10. St. Gallen                                           12,539 (  1.0%)
+ 11. Vaduz                                                11,286 (  0.9%)
+ 12. Baar                                                  9,697 (  0.8%)
+ 13. Fribourg                                              7,586 (  0.6%)
+ 14. Biel/Bienne                                           6,805 (  0.5%)
+ 15. Neuchâtel                                             6,702 (  0.5%)
+ 16. Sion                                                  6,588 (  0.5%)
+ 17. Chur                                                  5,835 (  0.5%)
+ 18. Carouge GE                                            5,333 (  0.4%)
+ 19. Schaffhausen                                          4,840 (  0.4%)
+ 20. La Chaux-de-Fonds                                     4,744 (  0.4%)
+
+GROESSENKATEGORIE
+=================
+Unique values: 6
+Top 20 categories:
+  1. MICRO                                              1,080,269 ( 85.6%)
+  2. KLEIN                                               116,064 (  9.2%)
+  3. UNBEK                                                52,056 (  4.1%)
+  4. MITTEL                                                8,594 (  0.7%)
+  5. GROSS                                                 3,508 (  0.3%)
+  6. SEHR GROSS                                            1,851 (  0.1%)
+
+BRANCHETEXT_02
+==============
+Unique values: 87
+Top 20 categories:
+  1. Landwirtschaft, Jagd und damit verbundene Tätigkeiten  105,297 (  8.3%)
+  2. Gesundheitswesen                                     88,505 (  7.0%)
+  3. Detailhandel (ohne Handel mit Motorfahrzeugen)       66,397 (  5.3%)
+  4. Grundstücks- und Wohnungswesen                       60,800 (  4.8%)
+  5. Verwaltung und Führung von Unternehmen und Betrieben, Unternehmensberatung   56,799 (  4.5%)
+  6. Erbringung von sonstigen überwiegend persönlichen Dienstleistungen   55,628 (  4.4%)
+  7. Vorbereitende Baustellenarbeiten, Bauinstallation und sonstiges Ausbaugewerbe   55,278 (  4.4%)
+  8. Grosshandel (ohne Handel mit Motorfahrzeugen)        46,981 (  3.7%)
+  9. Interessenvertretungen sowie kirchliche und sonstige religiöse Vereinigungen (ohne Sozialwesen und Sport)   43,173 (  3.4%)
+ 10. Erbringung von Finanzdienstleistungen                41,443 (  3.3%)
+ 11. Architektur- und Ingenieurbüros, technische, physikalische und chemische Untersuchung   40,737 (  3.2%)
+ 12. Rechts- und Steuerberatung, Wirtschaftsprüfung       40,138 (  3.2%)
+ 13. Erbringung von Dienstleistungen der Informationstechnologie   37,624 (  3.0%)
+ 14. Gastronomie                                          35,794 (  2.8%)
+ 15. Sonstige freiberufliche, wissenschaftliche und technische Tätigkeiten   35,501 (  2.8%)
+ 16. Erziehung und Unterricht                             34,474 (  2.7%)
+ 17. Kreative, künstlerische und unterhaltende Tätigkeiten   25,183 (  2.0%)
+ 18. Handel mit Motorfahrzeugen, Instandhaltung und Reparatur von Motorfahrzeugen   23,953 (  1.9%)
+ 19. Gebäudebetreuung, Garten- und Landschaftsbau         22,285 (  1.8%)
+ 20. Hochbau                                              21,336 (  1.7%)
+
+BRANCHETEXT_04
+==============
+Unique values: 607
+Top 20 categories:
+  1. Gesundheitswesen a. n. g.                            55,946 (  4.4%)
+  2. Unternehmensberatung                                 46,456 (  3.7%)
+  3. Frisör- und Kosmetiksalons                           35,071 (  2.8%)
+  4. Sonstige Interessenvertretungen und Vereinigungen a. n. g.   33,642 (  2.7%)
+  5. Restaurants, Gaststätten, Imbissstuben, Cafés, Eissalons u. Ä.   30,046 (  2.4%)
+  6. Erbringung von sonstigen Finanzdienstleistungen a. n. g.   26,884 (  2.1%)
+  7. Kauf und Verkauf von eigenen Grundstücken, Gebäuden und Wohnungen   23,885 (  1.9%)
+  8. Gemischte Landwirtschaft                             22,509 (  1.8%)
+  9. Haltung von Milchkühen                               21,777 (  1.7%)
+ 10. Architekturbüros                                     20,745 (  1.6%)
+ 11. Wirtschaftsprüfung und Steuerberatung, Buchführung   20,503 (  1.6%)
+ 12. Verwaltung von Grundstücken, Gebäuden und Wohnungen für Dritte   20,289 (  1.6%)
+ 13. Programmierungstätigkeiten                           19,693 (  1.6%)
+ 14. Rechtsberatung                                       19,635 (  1.6%)
+ 15. Ingenieurbüros                                       18,969 (  1.5%)
+ 16. Bau von Gebäuden                                     18,235 (  1.4%)
+ 17. Facharztpraxen                                       16,755 (  1.3%)
+ 18. Ateliers für Textil-, Schmuck-, Grafik- u. ä. Design   16,572 (  1.3%)
+ 19. Instandhaltung und Reparatur von Automobilen         15,407 (  1.2%)
+ 20. Darstellende Kunst                                   14,348 (  1.1%)
+
+DT_LOESCHUNGAUSFALL
+===================
+Unique values: 2
+Top 20 categories:
+  1. 1888-12-31                                         1,188,805 ( 94.2%)
+  2. 2028-02-23                                                1 (  0.0%)
