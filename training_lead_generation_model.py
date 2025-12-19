@@ -273,9 +273,7 @@ WHERE
 """
     log.info("Loading latest snapshot (current prospects) from DB...")
     df = pd.read_sql_query(text(query), engine, parse_dates=["snapshot_date", "Eintritt", "Austritt"])
-    print("lates snapshot data:")
-    
-    return df    
+    return df
 
 # --------------------
 # Feature utilities
@@ -408,6 +406,8 @@ def stratified_sample_large_dataset(df: pd.DataFrame, target_col: str, max_sampl
     if len(df) <= max_samples:
         return df.copy()
     
+    df_temp = df.copy()
+
     log.info(f"Dataset too large ({len(df):,} samples). Applying enhanced stratified sampling to {max_samples:,} samples...")
     
     # Define stratification strategy based on business importance
@@ -420,7 +420,6 @@ def stratified_sample_large_dataset(df: pd.DataFrame, target_col: str, max_sampl
     if 'Kanton' in df.columns:
         # Group smaller cantons together to avoid over-fragmentation
         major_cantons = ['ZH', 'BE', 'VD', 'GE', 'AG', 'SG', 'TI', 'VS', 'LU', 'ZG']
-        df_temp = df.copy()
         df_temp['Kanton_Grouped'] = df_temp['Kanton'].apply(
             lambda x: x if x in major_cantons else 'OTHER'
         )
@@ -434,7 +433,7 @@ def stratified_sample_large_dataset(df: pd.DataFrame, target_col: str, max_sampl
     
     # 4. Temporal stratification (preserve time-series properties)
     if 'snapshot_date' in df.columns:
-        df_temp['snapshot_year'] = df['snapshot_date'].dt.year
+        df_temp['snapshot_year'] = df_temp['snapshot_date'].dt.year
         stratification_features.append('snapshot_year')
         log.info("✅ Temporal stratification enabled")
     
@@ -442,7 +441,7 @@ def stratified_sample_large_dataset(df: pd.DataFrame, target_col: str, max_sampl
     if 'Rechtsform' in df.columns:
         # Group less common legal forms to avoid over-fragmentation
         major_forms = ['Einzelunternehmen', 'GmbH', 'Aktiengesellschaft', 'Verein','Genossenschaft']
-        df_temp['Rechtsform_Grouped'] = df['Rechtsform'].apply(
+        df_temp['Rechtsform_Grouped'] = df_temp['Rechtsform'].apply(
             lambda x: x if x in major_forms else 'OTHER'
         )
         stratification_features.append('Rechtsform_Grouped')
@@ -725,17 +724,6 @@ def checkpoint_exists():
     pipeline, params, metadata = load_checkpoint()
     return pipeline is not None and params is not None
 
-
-def main():
-    log.info("=== Starting Lead Generation Model Training (refactored) ===")
-    engine = make_engine(SERVER, DATABASE)
-    log.info("DB connection OK")
-
-    # 1) Load modeling (complete labels) + current prospects (latest snapshot)
-    df_model = load_modeling_data(engine, horizon_months=HORIZON_MONTHS)
-    log.info(f"Modeling rows: {len(df_model):,}, snapshots: {df_model['snapshot_date'].nunique()} "
-             f"from {df_model['snapshot_date'].min()} to {df_model['snapshot_date'].max()}")
-    log.info(f"Overall conversion rate (modeling): {df_model['Target'].mean():.4f}")
 
 # --------------------
 # Main

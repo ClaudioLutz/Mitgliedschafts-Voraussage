@@ -25,13 +25,16 @@ def create_test_dataset(n_samples=100000, random_state=42):
     
     # Define realistic distributions based on the actual data
     cantons = ['ZH', 'BE', 'VD', 'GE', 'AG', 'SG', 'TI', 'VS', 'LU', 'ZG'] + [f'C{i}' for i in range(10, 28)]
-    canton_probs = [0.17, 0.102, 0.091, 0.067, 0.062, 0.054, 0.052, 0.046, 0.044, 0.038] + [0.01] * 18
+    canton_probs = np.array([0.17, 0.102, 0.091, 0.067, 0.062, 0.054, 0.052, 0.046, 0.044, 0.038] + [0.01] * 18)
+    canton_probs = canton_probs / canton_probs.sum()  # Normalize to ensure sum is 1.0
     
     groessen = ['MICRO', 'KLEIN', 'MITTEL', 'GROSS', 'SEHR GROSS', 'UNBEK']
-    groessen_probs = [0.856, 0.092, 0.007, 0.003, 0.001, 0.041]
+    groessen_probs = np.array([0.856, 0.092, 0.007, 0.003, 0.001, 0.041])
+    groessen_probs = groessen_probs / groessen_probs.sum()
     
     rechtsform = ['Einzelunternehmen', 'GmbH', 'Aktiengesellschaft', 'Verein'] + [f'RF{i}' for i in range(4, 16)]
-    rechtsform_probs = [0.439, 0.221, 0.200, 0.053] + [0.087/12] * 12
+    rechtsform_probs = np.array([0.439, 0.221, 0.200, 0.053] + [0.087/12] * 12)
+    rechtsform_probs = rechtsform_probs / rechtsform_probs.sum()
     
     # Generate base dataset
     data = {

@@ -27,6 +27,7 @@ log = logging.getLogger(__name__)
 
 # Import the visualization functions
 from visualize_lead_model import make_all_viz
+from column_transformer_lead_gen import DROP_COLS
 
 # Configuration (same as training script)
 SERVER = "PRODSVCREPORT70"
@@ -106,7 +107,9 @@ modeling AS (
         -- existence: company founded on/before snapshot year
         AND (b.Gruendung_Jahr IS NULL OR b.Gruendung_Jahr <= YEAR(s.snapshot_date))
         -- realistic snapshots: exclude companies deleted/bankrupt before or at snapshot
-        AND (b.DT_LoeschungAusfall IS NULL OR b.DT_LoeschungAusfall > s.snapshot_date)
+        AND (b.DT_LoeschungAusfall IS NULL
+             OR b.DT_LoeschungAusfall = '1888-12-31'
+             OR b.DT_LoeschungAusfall > s.snapshot_date)
 )
 SELECT * FROM modeling;
 """
@@ -143,41 +146,74 @@ def temporal_feature_engineer(df: pd.DataFrame) -> pd.DataFrame:
         out["Company_Age_Years"] = 0
     return out
 
-def create_demo_data():
+def create_demo_data(n_samples: int = 5000, n_snapshots: int = 5):
     """
-    Create synthetic demo data if database connection fails.
-    This allows the visualization to run even without database access.
+    Create synthetic demo data with the SAME schema expected by the trained pipeline.
     """
-    log.info("Creating synthetic demo data...")
-    
-    # Create synthetic data with similar structure
-    np.random.seed(42)
-    n_samples = 5000
-    
-    # Generate synthetic features
-    data = {
-        'PLZ': np.random.choice([8000, 8001, 8002, 8003, 8004, 8005, 9000, 9001], n_samples),
-        'Kanton': np.random.choice(['ZH', 'BE', 'GE', 'BS', 'SG'], n_samples),
-        'Rechtsform': np.random.choice(['AG', 'GmbH', 'Einzelfirma'], n_samples),
-        'BrancheText_06': np.random.choice(['Handel', 'Dienstleistung', 'Industrie', 'IT'], n_samples),
-        'MitarbeiterBestand': np.random.lognormal(2, 1, n_samples).astype(int),
-        'Umsatz': np.random.lognormal(14, 1, n_samples),
-        'Risikoklasse': np.random.choice(['A', 'B', 'C', 'D'], n_samples),
-        'Company_Age_Years': np.random.exponential(10, n_samples),
-    }
-    
-    # Create target (membership conversion) - make it realistic with ~5% positive rate
-    target_prob = 0.05 + 0.02 * (data['Company_Age_Years'] / np.max(data['Company_Age_Years']))
-    target_prob = np.clip(target_prob, 0.01, 0.15)
-    data['Target'] = np.random.binomial(1, target_prob)
-    
-    df = pd.DataFrame(data)
-    
-    # Split into train/test (80/20)
-    n_train = int(0.8 * len(df))
-    df_train = df.iloc[:n_train].copy()
-    df_test = df.iloc[n_train:].copy()
-    
+    log.info("Creating synthetic demo data (schema-aligned)...")
+    rng = np.random.default_rng(42)
+
+    # Ensure >= 3 unique snapshot dates for split_by_unique_dates()
+    snapshot_dates = pd.date_range(
+        end=pd.Timestamp.today().normalize(),
+        periods=n_snapshots,
+        freq="MS"
+    )
+
+    df = pd.DataFrame({
+        "CrefoID": rng.integers(1_000_000, 9_999_999, size=n_samples),
+        "Name_Firma": [f"DemoFirma_{i:05d}" for i in range(n_samples)],
+        "Gruendung_Jahr": rng.integers(1950, pd.Timestamp.today().year + 1, size=n_samples),
+        "PLZ": rng.integers(1000, 9999, size=n_samples),
+        "Kanton": rng.choice(["ZH", "BE", "VD", "GE", "AG", "SG", "TI", "VS", "LU", "ZG"], size=n_samples),
+        "Rechtsform": rng.choice(["Einzelunternehmen", "GmbH", "Aktiengesellschaft", "Verein", "Genossenschaft"], size=n_samples),
+        "BrancheCode_06": rng.choice(["620100", "471100", "692000", "412000", "862100"], size=n_samples),
+        "BrancheText_06": rng.choice(["IT", "Handel", "Treuhand", "Bau", "Gesundheit"], size=n_samples),
+
+        "MitarbeiterBestand": rng.lognormal(2.0, 1.0, size=n_samples).round().astype(int),
+        "MitarbeiterBestandKategorieOrder": rng.integers(1, 7, size=n_samples),
+        "MitarbeiterBestandKategorie": rng.choice(["0", "1-9", "10-49", "50-249", "250+"], size=n_samples),
+
+        "Umsatz": rng.lognormal(14.0, 1.0, size=n_samples),
+        "UmsatzKategorieOrder": rng.integers(1, 7, size=n_samples),
+        "UmsatzKategorie": rng.choice(["<1M", "1-5M", "5-20M", "20-100M", ">100M"], size=n_samples),
+
+        # Keep numeric (your pipeline treats this as numeric)
+        "Risikoklasse": rng.integers(1, 5, size=n_samples),
+
+        "Ort": rng.choice(["Zürich", "Bern", "Lausanne", "Genève", "Basel", "St. Gallen"], size=n_samples),
+        "RechtsCode": rng.choice(["AG", "GMBH", "EINF", "VEREIN", "GEN"], size=n_samples),
+        "GroessenKategorie": rng.choice(["MICRO", "KLEIN", "MITTEL", "GROSS"], size=n_samples),
+        "V_Bestand_Kategorie": rng.choice(["NEU", "BESTAND", "ALT"], size=n_samples),
+
+        "BrancheCode_02": rng.choice(["62", "47", "69", "41", "86"], size=n_samples),
+        "BrancheCode_04": rng.choice(["6201", "4711", "6920", "4120", "8621"], size=n_samples),
+        "BrancheText_02": rng.choice(["IT", "Handel", "Treuhand", "Bau", "Gesundheit"], size=n_samples),
+        "BrancheText_04": rng.choice(["IT", "Handel", "Treuhand", "Bau", "Gesundheit"], size=n_samples),
+
+        # Leakage columns present in real data; set to NaT in demo
+        "Eintritt": pd.NaT,
+        "Austritt": pd.NaT,
+        "DT_LoeschungAusfall": pd.NaT,
+
+        "snapshot_date": pd.to_datetime(rng.choice(snapshot_dates, size=n_samples)),
+    })
+
+    # Create a realistic-ish target (~3–12% depending on some drivers)
+    age_years = (df["snapshot_date"].dt.year - df["Gruendung_Jahr"]).clip(lower=0)
+    prob = (
+        0.03
+        + 0.02 * (df["GroessenKategorie"].isin(["MITTEL", "GROSS"]).astype(int))
+        + 0.01 * (df["Risikoklasse"] <= 2).astype(int)
+        + 0.02 * np.tanh((age_years - 5) / 10)
+    )
+    prob = np.clip(prob, 0.01, 0.20)
+    df["Target"] = rng.binomial(1, prob)
+
+    # Sort by time and split like training logic expects
+    df = df.sort_values("snapshot_date").reset_index(drop=True)
+    df_train, _, df_test = split_by_unique_dates(df)
+
     return df_train, df_test
 
 def main():
@@ -212,11 +248,6 @@ def main():
         df_train_eng = temporal_feature_engineer(df_train)
         df_test_eng = temporal_feature_engineer(df_test)
         
-        # Get feature columns (exclude leakage columns)
-        DROP_COLS = {
-            "Target", "Eintritt", "Austritt", "snapshot_date", "DT_LoeschungAusfall",
-            "CrefoID", "Name_Firma"  # Also drop ID columns
-        }
         feature_cols = [c for c in df_train_eng.columns if c not in DROP_COLS]
         
         X_train = df_train_eng[feature_cols]
@@ -236,10 +267,14 @@ def main():
         # Use synthetic data for demo
         df_train, df_test = create_demo_data()
         
-        feature_cols = [c for c in df_train.columns if c != 'Target']
-        X_train = df_train[feature_cols]
+        df_train_eng = temporal_feature_engineer(df_train)
+        df_test_eng = temporal_feature_engineer(df_test)
+
+        feature_cols = [c for c in df_train_eng.columns if c not in DROP_COLS]
+
+        X_train = df_train_eng[feature_cols]
         y_train = df_train["Target"].values
-        X_test = df_test[feature_cols]
+        X_test = df_test_eng[feature_cols]
         y_test = df_test["Target"].values
         
         log.info(f"Created synthetic data: {len(X_train)} train, {len(X_test)} test samples")
