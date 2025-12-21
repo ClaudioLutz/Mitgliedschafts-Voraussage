@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SHAB Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+    <!-- Load Plotly from local vendor file -->
+    <script src="{{ url_for('static', filename='vendor/plotly.min.js') }}"></script>
+</head>
+<body>
+
+<header class="dashboard-header">
+    <div class="header-left">
+        <h1>SHAB Dashboard</h1>
+        <p class="subtitle">Monitor Swiss Commercial Register Events</p>
+    </div>
+    <div class="header-right">
+        <div id="statusIndicator" class="status-indicator">Loading...</div>
+    </div>
+</header>
+
+<div class="dashboard-container">
+
+    <!-- Sidebar Controls -->
+    <aside class="sidebar">
+        <div class="control-group">
+            <label for="metricSelect">Metric</label>
+            <select id="metricSelect">
+                <!-- Populated by JS -->
+            </select>
+        </div>
+
+        <div class="control-group">
+            <label>Geography Mode</label>
+            <div class="toggle-group">
+                <button class="toggle-btn active" data-geo="CH">CH Total</button>
+                <button class="toggle-btn" data-geo="KT">Canton</button>
+            </div>
+        </div>
+
+        <div class="control-group" id="cantonControlGroup" style="display: none;">
+            <label for="cantonSelect">Canton</label>
+            <select id="cantonSelect">
+                <!-- Populated by JS -->
+            </select>
+        </div>
+
+        <div class="control-group">
+             <label>Date Range</label>
+             <div class="button-group">
+                 <button class="range-btn" data-months="6">6M</button>
+                 <button class="range-btn" data-months="12">12M</button>
+                 <button class="range-btn active" data-months="24">24M</button>
+                 <button class="range-btn" data-months="0">Max</button>
+             </div>
+        </div>
+
+        <div class="sidebar-footer">
+            <small>Click heatmap cells to filter by canton.</small>
+        </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main-content">
+        <!-- Time Series Chart -->
+        <div class="card">
+            <div class="card-header">
+                <h2>Time Series</h2>
+                <div class="card-controls">
+                     <!-- Additional controls if needed -->
+                </div>
+            </div>
+            <div id="tsChart" class="chart-container"></div>
+        </div>
+
+        <!-- Heatmap Chart -->
+        <div class="card">
+            <div class="card-header">
+                <h2>Canton Heatmap</h2>
+            </div>
+            <div id="hmChart" class="chart-container"></div>
+        </div>
+    </main>
+
+</div>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
