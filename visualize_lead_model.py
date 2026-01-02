@@ -547,8 +547,7 @@ def plot_calibration_and_gains(
         y_prob = ranks.values
 
     # Calibration curve
-    prob_true, prob_pred = calibration_curve(y_test, y_prob, n_bins=10, strategy="quantile")
-    CalibrationDisplay(prob_true, prob_pred).plot()
+    CalibrationDisplay.from_predictions(y_test, y_prob, n_bins=10, strategy="quantile")
     plt.title("Calibration (Reliability) Curve")
     plt.tight_layout()
     plt.savefig(os.path.join(figures_dir, "calibration_curve.png"), dpi=180)

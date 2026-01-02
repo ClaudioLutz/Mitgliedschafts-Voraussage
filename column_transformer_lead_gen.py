@@ -241,6 +241,9 @@ class CategoricalTypeConverter:
     def fit_transform(self, X, y=None):
         return self.fit(X, y).transform(X)
 
+    def get_feature_names_out(self, input_features=None):
+        return input_features
+
 # Low-cardinality categorical preprocessing with type conversion
 try:
     # Handle sklearn version differences
@@ -263,13 +266,27 @@ except TypeError:
     ])
 
 # High-cardinality categorical preprocessing with type conversion
+if SKLEARN_TARGET_ENCODER:
+    # sklearn.preprocessing.TargetEncoder
+    target_encoder = TargetEncoder(
+        smooth="auto",
+        cv=5,
+        shuffle=True,
+        random_state=42
+    )
+else:
+    # category_encoders.target_encoder.TargetEncoder (different parameter names)
+    target_encoder = TargetEncoder(
+        smoothing=10.0,
+        min_samples_leaf=20,
+        handle_unknown="value",
+        handle_missing="value"
+    )
+
 high_card_pipeline = Pipeline([
     ('type_converter', CategoricalTypeConverter()),
     ('imputer', SimpleImputer(strategy='constant', fill_value='missing')),
-    ('target_encoder', TargetEncoder(
-        smooth='auto',          # Automatic smoothing based on category frequency
-        random_state=42
-    ))
+    ('target_encoder', target_encoder)
 ])
 
 

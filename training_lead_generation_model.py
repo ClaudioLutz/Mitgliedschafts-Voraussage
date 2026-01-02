@@ -51,6 +51,7 @@ except Exception:
 
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import HistGradientBoostingClassifier
+import inspect
 
 # Import new Lead-Gen preprocessor
 from column_transformer_lead_gen import create_lead_gen_preprocessor, DROP_COLS, validate_preprocessor
@@ -271,9 +272,7 @@ WHERE
 """
     log.info("Loading latest snapshot (current prospects) from DB...")
     df = pd.read_sql_query(text(query), engine, parse_dates=["snapshot_date", "Eintritt", "Austritt"])
-    print("lates snapshot data:")
-    
-    return df    
+    return df
 
 # --------------------
 # Feature utilities
@@ -386,6 +385,30 @@ def compute_ts_gap_samples(df_train_val: pd.DataFrame, date_col="snapshot_date",
     return gap
 
 
+def make_calibrated_classifier(estimator, method: str, cv):
+    """
+    Handles sklearn API differences: some versions use 'estimator', older use 'base_estimator'.
+    """
+    params = inspect.signature(CalibratedClassifierCV).parameters
+    if "estimator" in params:
+        return CalibratedClassifierCV(estimator=estimator, method=method, cv=cv)
+    return CalibratedClassifierCV(base_estimator=estimator, method=method, cv=cv)
+
+
+def ensure_chronological_order(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Sort rows chronologically for time-series CV. Uses snapshot_date and a stable tie-breaker if available.
+    """
+    if "snapshot_date" not in df.columns:
+        return df.reset_index(drop=True)
+
+    sort_cols = ["snapshot_date"]
+    if "CrefoID" in df.columns:
+        sort_cols.append("CrefoID")
+
+    return df.sort_values(sort_cols).reset_index(drop=True)
+
+
 def stratified_sample_large_dataset(df: pd.DataFrame, target_col: str, max_samples: int, random_state: int = 42) -> pd.DataFrame:
     """
     Enhanced multi-dimensional stratified sampling for large datasets.
@@ -403,6 +426,8 @@ def stratified_sample_large_dataset(df: pd.DataFrame, target_col: str, max_sampl
     if len(df) <= max_samples:
         return df.copy()
     
+    df_temp = df.copy()
+
     log.info(f"Dataset too large ({len(df):,} samples). Applying enhanced stratified sampling to {max_samples:,} samples...")
     
     # Define stratification strategy based on business importance
@@ -415,7 +440,6 @@ def stratified_sample_large_dataset(df: pd.DataFrame, target_col: str, max_sampl
     if 'Kanton' in df.columns:
         # Group smaller cantons together to avoid over-fragmentation
         major_cantons = ['ZH', 'BE', 'VD', 'GE', 'AG', 'SG', 'TI', 'VS', 'LU', 'ZG']
-        df_temp = df.copy()
         df_temp['Kanton_Grouped'] = df_temp['Kanton'].apply(
             lambda x: x if x in major_cantons else 'OTHER'
         )
@@ -429,7 +453,7 @@ def stratified_sample_large_dataset(df: pd.DataFrame, target_col: str, max_sampl
     
     # 4. Temporal stratification (preserve time-series properties)
     if 'snapshot_date' in df.columns:
-        df_temp['snapshot_year'] = df['snapshot_date'].dt.year
+        df_temp['snapshot_year'] = df_temp['snapshot_date'].dt.year
         stratification_features.append('snapshot_year')
         log.info("✅ Temporal stratification enabled")
     
@@ -437,7 +461,7 @@ def stratified_sample_large_dataset(df: pd.DataFrame, target_col: str, max_sampl
     if 'Rechtsform' in df.columns:
         # Group less common legal forms to avoid over-fragmentation
         major_forms = ['Einzelunternehmen', 'GmbH', 'Aktiengesellschaft', 'Verein','Genossenschaft']
-        df_temp['Rechtsform_Grouped'] = df['Rechtsform'].apply(
+        df_temp['Rechtsform_Grouped'] = df_temp['Rechtsform'].apply(
             lambda x: x if x in major_forms else 'OTHER'
         )
         stratification_features.append('Rechtsform_Grouped')
@@ -513,7 +537,8 @@ def stratified_sample_large_dataset(df: pd.DataFrame, target_col: str, max_sampl
         columns_to_drop.append('snapshot_year')
     
     result = result.drop(columns=columns_to_drop, errors='ignore')
-    result = result.sample(frac=1, random_state=random_state).reset_index(drop=True)
+    # Do not shuffle; preserve chronological order for time-series workflows
+    result = ensure_chronological_order(result)
     
     # Enhanced reporting
     log.info(f"✅ Enhanced stratified sampling complete: {len(df):,} -> {len(result):,} samples")
@@ -612,10 +637,10 @@ def advanced_stratified_sample_with_business_logic(df: pd.DataFrame, target_col:
     # Step 3: Combine rare cases with main sample
     if len(rare_cases) > 0:
         final_result = pd.concat([rare_cases, main_sample], ignore_index=True)
-        final_result = final_result.sample(frac=1, random_state=random_state).reset_index(drop=True)
+        final_result = ensure_chronological_order(final_result)
         log.info(f"🎯 Business-logic sampling complete: {len(rare_cases)} rare + {len(main_sample)} stratified = {len(final_result)} total")
     else:
-        final_result = main_sample
+        final_result = ensure_chronological_order(main_sample)
         log.info(f"🎯 Business-logic sampling complete: {len(final_result)} samples (no rare cases found)")
     
     return final_result
@@ -720,17 +745,6 @@ def checkpoint_exists():
     pipeline, params, metadata = load_checkpoint()
     return pipeline is not None and params is not None
 
-
-def main():
-    log.info("=== Starting Lead Generation Model Training (refactored) ===")
-    engine = make_engine(SERVER, DATABASE)
-    log.info("DB connection OK")
-
-    # 1) Load modeling (complete labels) + current prospects (latest snapshot)
-    df_model = load_modeling_data(engine, horizon_months=HORIZON_MONTHS)
-    log.info(f"Modeling rows: {len(df_model):,}, snapshots: {df_model['snapshot_date'].nunique()} "
-             f"from {df_model['snapshot_date'].min()} to {df_model['snapshot_date'].max()}")
-    log.info(f"Overall conversion rate (modeling): {df_model['Target'].mean():.4f}")
 
 # --------------------
 # Main
@@ -844,13 +858,31 @@ def main():
                 random_state=RANDOM_STATE
             )
         
-        # Split back into features and target
+        sampled_data = ensure_chronological_order(sampled_data)
+
+        # Keep an ordering frame for time-series logic
+        ordering_df = sampled_data[["snapshot_date"] + (["CrefoID"] if "CrefoID" in sampled_data.columns else [])].copy()
+
+        # Build feature columns excluding leakage/ID/date fields
+        feature_cols = [c for c in sampled_data.columns if c not in DROP_COLS]
+
+        # Train matrices
         X_train_val = sampled_data[feature_cols]
-        y_train_val = sampled_data["Target"]
+        y_train_val = sampled_data["Target"].astype(int).values
         
         log.info(f"🎯 Memory-optimized training data: {len(X_train_val):,} samples")
     else:
         log.info(f"📊 Using full training dataset: {len(X_train_val):,} samples")
+        # Ensure chronological order even if not sampling
+        combined_data = X_train_val.copy()
+        combined_data["Target"] = y_train_val
+        combined_data = ensure_chronological_order(combined_data)
+
+        ordering_df = combined_data[["snapshot_date"] + (["CrefoID"] if "CrefoID" in combined_data.columns else [])].copy()
+        X_train_val = combined_data[feature_cols]
+        y_train_val = combined_data["Target"].astype(int).values
+
+        sampled_data = combined_data # For consistency
 
     # Multi-tier approach: Known params > Checkpoint > Full search
     if USE_BEST_KNOWN_PARAMS and not FORCE_NEW_SEARCH:
@@ -902,7 +934,7 @@ def main():
         }
 
         # Compute time-meaningful gap on TRAIN+VAL only (≈2 months)
-        gap_samples = compute_ts_gap_samples(X_train_val, months_gap=2)
+        gap_samples = compute_ts_gap_samples(sampled_data, months_gap=2)
         
         tscv = TimeSeriesSplit(n_splits=N_SPLITS, gap=gap_samples)
         scoring = {
@@ -926,7 +958,7 @@ def main():
         )
 
         # 8) Fit search and save checkpoint immediately
-        search.fit(X_train_val[feature_cols], y_train_val)
+        search.fit(X_train_val, y_train_val)
         
         log.info(f"Best params: {search.best_params_}")
         log.info(f"Best CV AP (PR-AUC): {search.best_score_:.5f}")
@@ -936,27 +968,22 @@ def main():
         log.info("💾 Checkpoint saved: Future runs will use fast path")
 
     # 9) Time-aware calibration on Train+Val
-    # Compute gap for calibration using original unsampled data for accurate time calculation
-    original_combined = pd.concat([df_train_eng, df_val_eng], ignore_index=True)
-    cal_gap = max(50, compute_ts_gap_samples(original_combined, months_gap=2) // 2)
-    cal_tscv = TimeSeriesSplit(n_splits=CAL_SPLITS, gap=cal_gap)
+    # sampled_data should include snapshot_date; ensure it is ordered
+    sampled_data = ensure_chronological_order(sampled_data)
+
+    # Compute gap from the ordered frame that includes snapshot_date
+    gap = compute_ts_gap_samples(sampled_data, months_gap=2)
+    cal_cv = TimeSeriesSplit(n_splits=CAL_SPLITS, gap=gap)
     
-    # Updated API: sklearn >= 1.6 uses 'estimator=' instead of 'base_estimator='
-    try:
-        calibrated = CalibratedClassifierCV(
-            estimator=search.best_estimator_,
-            method="isotonic",
-            cv=cal_tscv
-        )
-    except TypeError:
-        # Fallback for older sklearn versions
-        calibrated = CalibratedClassifierCV(
-            base_estimator=search.best_estimator_,
-            method="isotonic",
-            cv=cal_tscv
-        )
+    os.makedirs(ARTIFACTS_DIR, exist_ok=True)
+
+    calibrated = make_calibrated_classifier(
+        estimator=search.best_estimator_,
+        method="isotonic",   # or "sigmoid" if you prefer and have enough data
+        cv=cal_cv
+    )
     
-    calibrated.fit(X_train_val[feature_cols], y_train_val)
+    calibrated.fit(X_train_val, y_train_val)
 
     # Save calibrated model for future use without re-calibration
     try:
