@@ -27,7 +27,9 @@ Lead generation pipeline that predicts membership conversion for Swiss companies
 2. Install dependencies:
    - `pip install -r requirements.txt`
    - `pip install -r requirements-dev.txt`
-3. Install Microsoft ODBC Driver 17 for SQL Server and ensure access to the target DB (Windows integrated auth by default).
+3. Optional DNN backend:
+   - `pip install -r requirements-dnn.txt`
+4. Install Microsoft ODBC Driver 17 for SQL Server and ensure access to the target DB (Windows integrated auth by default).
 
 ## Configuration
 Update the constants near the top of these scripts as needed:
@@ -41,6 +43,7 @@ Key settings:
 - `LEAD_CAPACITY_K` - top-K precision target
 - `N_ITER`, `N_SPLITS`, `CAL_SPLITS` - search and calibration budgets
 - `SAMPLE_TRAINING_DATA`, `MAX_TRAINING_SAMPLES`, `USE_BUSINESS_LOGIC_SAMPLING`
+- `MODEL_BACKEND` (env var) - `hgb`, `xgb_cpu`, `xgb_gpu`, `dnn`
 
 ## Pipeline at a glance
 1. Load modeling snapshots with complete label windows.

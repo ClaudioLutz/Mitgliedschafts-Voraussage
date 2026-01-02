@@ -28,6 +28,7 @@ from packaging.version import Version
 from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
 from sklearn.metrics import average_precision_score
 from sklearn.pipeline import Pipeline
+from sklearn.utils.class_weight import compute_class_weight
 
 # --------------------
 # Extensive Logging setup
@@ -124,7 +125,7 @@ except Exception:
     HAVE_IMBLEARN = False
 
 # Model Backend Configuration
-# Options: 'hgb' (default), 'xgb_gpu', 'xgb_cpu'
+# Options: 'hgb' (default), 'xgb_gpu', 'xgb_cpu', 'dnn'
 MODEL_BACKEND = os.environ.get("MODEL_BACKEND", "hgb").lower()
 
 # Model persistence for checkpointing
@@ -167,6 +168,20 @@ BEST_PARAMS_XGB = {
     "classifier__reg_alpha": 0.0,
     "classifier__gamma": 0.0
 }
+
+# Initial defaults for DNN (no search)
+BEST_PARAMS_DNN = {}
+
+# DNN default training configuration
+DNN_HIDDEN_UNITS = (128, 64)
+DNN_DROPOUT = 0.2
+DNN_L2 = 0.0001
+DNN_LEARNING_RATE = 1e-3
+DNN_BATCH_SIZE = 4096
+DNN_EPOCHS = 20
+DNN_PATIENCE = 3
+DNN_VALIDATION_SPLIT = 0.1
+DNN_VERBOSE = 0
 
 
 # --------------------
@@ -488,6 +503,62 @@ def get_xgb_classifier(backend, random_state=42, scale_pos_weight=1.0):
             tree_method="hist",
             **common_params
         )
+
+
+def get_dnn_classifier(
+    hidden_units=None,
+    dropout=None,
+    l2=None,
+    learning_rate=None,
+    batch_size=None,
+    epochs=None,
+    patience=None,
+    validation_split=None,
+    random_state=None,
+    verbose=None,
+):
+    """Factory to create a SciKeras-compatible DNN classifier."""
+    try:
+        from model_backends.dnn_classifier import make_dnn_estimator
+    except Exception as exc:
+        raise RuntimeError(
+            "DNN backend requires tensorflow and scikeras. "
+            "Install requirements-dnn.txt."
+        ) from exc
+
+    if hidden_units is None:
+        hidden_units = DNN_HIDDEN_UNITS
+    if dropout is None:
+        dropout = DNN_DROPOUT
+    if l2 is None:
+        l2 = DNN_L2
+    if learning_rate is None:
+        learning_rate = DNN_LEARNING_RATE
+    if batch_size is None:
+        batch_size = DNN_BATCH_SIZE
+    if epochs is None:
+        epochs = DNN_EPOCHS
+    if patience is None:
+        patience = DNN_PATIENCE
+    if validation_split is None:
+        validation_split = DNN_VALIDATION_SPLIT
+    if random_state is None:
+        random_state = RANDOM_STATE
+    if verbose is None:
+        verbose = DNN_VERBOSE
+
+    return make_dnn_estimator(
+        hidden_units=hidden_units,
+        dropout=dropout,
+        l2=l2,
+        learning_rate=learning_rate,
+        batch_size=batch_size,
+        epochs=epochs,
+        patience=patience,
+        validation_split=validation_split,
+        random_state=random_state,
+        verbose=verbose,
+    )
 
 def stratified_sample_large_dataset(df: pd.DataFrame, target_col: str, max_samples: int, random_state: int = 42) -> pd.DataFrame:
     """
@@ -905,6 +976,21 @@ def main():
         PipelineClass = Pipeline
         log.info(f"Imbalance handling via XGBoost scale_pos_weight (no SMOTE).")
 
+    elif MODEL_BACKEND == "dnn":
+        log.info("Using DNN backend.")
+        pre = create_lead_gen_preprocessor(onehot_sparse=False)
+        log.info("Using Lead-Gen ColumnTransformer (Dense Mode, Float32) for DNN")
+
+        clf = get_dnn_classifier()
+
+        steps = [
+            ("preprocessor", pre),
+            ("to_float32", ToFloat32Transformer()),
+            ("classifier", clf)
+        ]
+        PipelineClass = Pipeline
+        log.info("Imbalance handling via class_weight passed to DNN (set after sampling).")
+
     else:
         # HGB (Legacy) path
         pre = create_lead_gen_preprocessor(onehot_sparse=False)
@@ -1010,6 +1096,16 @@ def main():
         # Update the parameter in the pipeline
         pipe.set_params(classifier__scale_pos_weight=ratio)
 
+    if MODEL_BACKEND == "dnn":
+        classes = np.unique(y_train_val)
+        if len(classes) == 2:
+            weights = compute_class_weight(class_weight="balanced", classes=classes, y=y_train_val)
+            class_weight = {int(classes[0]): float(weights[0]), int(classes[1]): float(weights[1])}
+            pipe.set_params(classifier__fit__class_weight=class_weight)
+            log.info(f"Using DNN class_weight: {class_weight}")
+        else:
+            log.warning("DNN class_weight skipped: only one class present in training data.")
+
     # Multi-tier approach: Known params > Checkpoint > Full search
     if USE_BEST_KNOWN_PARAMS and not FORCE_NEW_SEARCH:
         # TIER 1: Use proven best parameters (fastest path - ~30x faster)
@@ -1021,6 +1117,8 @@ def main():
             if "classifier__scale_pos_weight" not in current_best_params:
                 current_best_params = current_best_params.copy()
                 current_best_params["classifier__scale_pos_weight"] = ratio
+        elif MODEL_BACKEND == "dnn":
+            current_best_params = BEST_PARAMS_DNN
         else:
             current_best_params = BEST_PARAMS_HGB
 
@@ -1072,6 +1170,16 @@ def main():
                 "classifier__colsample_bytree": [0.6, 0.8, 1.0],
                 "classifier__reg_lambda": [0.1, 1.0, 5.0],
                 "classifier__gamma": [0.0, 0.1, 1.0],
+            }
+        elif MODEL_BACKEND == "dnn":
+            # DNN Search Space (keep small; early stopping controls training time)
+            param_distributions = {
+                "classifier__model__hidden_units": [(128, 64), (256, 128), (256, 128, 64)],
+                "classifier__model__dropout": [0.0, 0.2, 0.4],
+                "classifier__model__l2": [0.0, 1e-4, 1e-3],
+                "classifier__model__learning_rate": [1e-3, 3e-4, 1e-4],
+                "classifier__batch_size": [2048, 4096, 8192],
+                "classifier__epochs": [10, 20, 30],
             }
         else:
             # HGB Search Space

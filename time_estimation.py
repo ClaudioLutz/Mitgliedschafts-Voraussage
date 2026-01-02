@@ -32,7 +32,7 @@ DATABASE = "CAG_Analyse"
 SCHEMA = "mitgliederstatistik"
 
 # Model Backend Configuration
-# Options: 'hgb' (default), 'xgb_gpu', 'xgb_cpu'
+# Options: 'hgb' (default), 'xgb_gpu', 'xgb_cpu', 'dnn'
 MODEL_BACKEND = os.environ.get("MODEL_BACKEND", "hgb").lower()
 
 HORIZON_MONTHS = 12
@@ -179,6 +179,28 @@ def main():
             random_state=42,
             max_bin=256,
             n_jobs=1 # Single thread estimate often safer for extrapolation
+        )
+        pipe = Pipeline([("pre", pre), ("to_float", to_float), ("clf", clf)])
+
+    elif MODEL_BACKEND == "dnn":
+        print("Estimating time for backend: DNN")
+        try:
+            from model_backends.dnn_classifier import make_dnn_estimator
+        except Exception as exc:
+            raise RuntimeError(
+                "DNN backend requires tensorflow and scikeras. "
+                "Install requirements-dnn.txt."
+            ) from exc
+
+        pre = create_lead_gen_preprocessor(onehot_sparse=False)
+        to_float = ToFloat32Transformer()
+
+        clf = make_dnn_estimator(
+            batch_size=4096,
+            epochs=5,
+            patience=2,
+            validation_split=0.1,
+            verbose=0,
         )
         pipe = Pipeline([("pre", pre), ("to_float", to_float), ("clf", clf)])
 
