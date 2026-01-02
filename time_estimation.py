@@ -12,16 +12,28 @@ from sqlalchemy import create_engine, URL, text
 
 # --- scikit-learn bits
 from sklearn import __version__ as sklearn_version
+import os
+import numpy as np
 from sklearn.pipeline import Pipeline
 from sklearn.ensemble import HistGradientBoostingClassifier
 
-from column_transformer_lead_gen import create_lead_gen_preprocessor, DROP_COLS
+try:
+    from xgboost import XGBClassifier
+    HAVE_XGBOOST = True
+except ImportError:
+    HAVE_XGBOOST = False
+
+from column_transformer_lead_gen import create_lead_gen_preprocessor, DROP_COLS, ToFloat32Transformer
 from training_lead_generation_model import temporal_feature_engineer
 
 # ----------------- CONFIG -----------------
 SERVER = "PRODSVCREPORT70"
 DATABASE = "CAG_Analyse"
 SCHEMA = "mitgliederstatistik"
+
+# Model Backend Configuration
+# Options: 'hgb' (default), 'xgb_gpu', 'xgb_cpu'
+MODEL_BACKEND = os.environ.get("MODEL_BACKEND", "hgb").lower()
 
 HORIZON_MONTHS = 12
 SAMPLE_FRACTION = 0.02     # 2% probe (adjust if you want faster/slower)
@@ -147,18 +159,42 @@ def main():
     feature_cols = [col for col in df.columns if col not in DROP_COLS]
     X = df[feature_cols].copy()
 
-    pre = create_lead_gen_preprocessor()
+    # Configure Pipeline based on backend
+    if MODEL_BACKEND.startswith("xgb"):
+        print(f"Estimating time for backend: {MODEL_BACKEND.upper()}")
+        if not HAVE_XGBOOST:
+            raise RuntimeError("XGBoost not installed.")
 
-    # Pick ONE imbalance strategy: class_weight if available in this sklearn, else none (since this is only a probe)
-    use_class_weight = Version(sklearn_version) >= Version("1.5")
-    clf = HistGradientBoostingClassifier(
-        random_state=42,
-        early_stopping=False,
-        class_weight=("balanced" if use_class_weight else None),
-        max_iter=200, max_leaf_nodes=31, min_samples_leaf=20, l2_regularization=0.1
-    )
+        pre = create_lead_gen_preprocessor(onehot_sparse=True)
+        to_float = ToFloat32Transformer()
 
-    pipe = Pipeline([("pre", pre), ("clf", clf)])
+        tree_method = "gpu_hist" if MODEL_BACKEND == "xgb_gpu" else "hist"
+
+        clf = XGBClassifier(
+            tree_method=tree_method,
+            n_estimators=100, # Conservative for timing
+            learning_rate=0.1,
+            max_depth=6,
+            objective="binary:logistic",
+            random_state=42,
+            max_bin=256,
+            n_jobs=1 # Single thread estimate often safer for extrapolation
+        )
+        pipe = Pipeline([("pre", pre), ("to_float", to_float), ("clf", clf)])
+
+    else:
+        print("Estimating time for backend: HGB (Legacy)")
+        pre = create_lead_gen_preprocessor(onehot_sparse=False)
+
+        # Pick ONE imbalance strategy: class_weight if available in this sklearn, else none (since this is only a probe)
+        use_class_weight = Version(sklearn_version) >= Version("1.5")
+        clf = HistGradientBoostingClassifier(
+            random_state=42,
+            early_stopping=False,
+            class_weight=("balanced" if use_class_weight else None),
+            max_iter=200, max_leaf_nodes=31, min_samples_leaf=20, l2_regularization=0.1
+        )
+        pipe = Pipeline([("pre", pre), ("clf", clf)])
 
     print("Timing ONE fit on the sample…")
     t0 = time.time()
