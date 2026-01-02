@@ -1,5 +1,3 @@
-
-
 # training_lead_generation_model_refactored.py
 # -------------------------------------------
 # Lead-generation oriented, leakage-safe training with time-aware CV & calibration.
@@ -121,7 +119,7 @@ N_JOBS_SEARCH = 1  # avoid worker crashes on huge folds (increase if RAM allows)
 
 # Memory optimization settings
 SAMPLE_TRAINING_DATA = True  # Use stratified sampling for large datasets
-MAX_TRAINING_SAMPLES = 1500000  # Maximum samples for training (increased for better stratification)
+MAX_TRAINING_SAMPLES = 2500000  # Maximum samples for training (increased for better stratification)
 USE_BUSINESS_LOGIC_SAMPLING = True  # Use advanced business-logic sampling
 PRESERVE_RARE_POSITIVES = True  # Preserve rare but valuable positive cases
 
@@ -326,9 +324,6 @@ def temporal_feature_engineer(df: pd.DataFrame) -> pd.DataFrame:
         out["Company_Age_Years"] = 0
 
     return out
-
-
-
 
 # --------------------
 # Scorers & metrics
