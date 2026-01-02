@@ -143,7 +143,7 @@ RANDOM_STATE = 42
 # --------------------
 # Configuration flags
 USE_BEST_KNOWN_PARAMS = True   # Use proven best parameters (fastest)
-FORCE_NEW_SEARCH = False       # Override to always run hyperparameter search
+FORCE_NEW_SEARCH = True       # Override to always run hyperparameter search
 ENABLE_CHECKPOINTING = True    # Save/load search results to avoid re-work
 
 # Best hyperparameters from previous 3-hour search (HGB)
