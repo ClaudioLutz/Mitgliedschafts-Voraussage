@@ -16,6 +16,9 @@ pyodbc>=4.0.34
 # Data persistence and model serialization
 joblib>=1.2.0
 
+# System utilities
+psutil>=5.9.0
+
 # Visualization libraries
 matplotlib>=3.5.0
 seaborn>=0.11.0

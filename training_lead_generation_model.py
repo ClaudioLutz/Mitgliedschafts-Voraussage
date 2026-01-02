@@ -14,6 +14,7 @@ import math
 import logging
 import warnings
 from datetime import datetime, timedelta
+import psutil
 
 import numpy as np
 import pandas as pd
@@ -29,13 +30,74 @@ from sklearn.metrics import average_precision_score
 from sklearn.pipeline import Pipeline
 
 # --------------------
-# Logging setup (must be before any log.warning calls)
+# Extensive Logging setup
 # --------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
+import time
+from functools import wraps
+
+# Create a custom logger
 log = logging.getLogger(__name__)
+log.setLevel(logging.DEBUG)  # Capture everything
+
+# Create handlers
+c_handler = logging.StreamHandler() # Console
+f_handler = logging.FileHandler(f'training_run_{datetime.now().strftime("%Y%m%d_%H%M")}.log') # File
+
+# Create formatters and add it to handlers
+# We add milliseconds (%(msecs)03d) to see if steps are hanging quickly
+log_format = logging.Formatter('%(asctime)s.%(msecs)03d [%(levelname)s] %(funcName)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+c_handler.setFormatter(log_format)
+f_handler.setFormatter(log_format)
+
+# Add handlers to the logger
+# Avoid adding handlers multiple times if script is re-run in interactive env
+if not log.hasHandlers():
+    log.addHandler(c_handler)
+    log.addHandler(f_handler)
+if log.handlers:
+    log.propagate = False
+
+# Attach handlers to root so logs from other modules are captured.
+root_logger = logging.getLogger()
+if not root_logger.hasHandlers():
+    root_logger.addHandler(c_handler)
+    root_logger.addHandler(f_handler)
+root_logger.setLevel(logging.DEBUG)
+
+# --------------------
+# Helper: Execution Timer Decorator
+# --------------------
+def log_execution(func):
+    """Decorator to log start, end, and duration of functions automatically."""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        log.info(f"🟢 START: {func.__name__}")
+        start_time = time.time()
+        try:
+            result = func(*args, **kwargs)
+            end_time = time.time()
+            duration = end_time - start_time
+            
+            # If result is a DataFrame/Array, log its shape
+            meta = ""
+            if hasattr(result, 'shape'):
+                meta = f" | Output Shape: {result.shape}"
+            elif isinstance(result, (list, tuple)):
+                meta = f" | Output Len: {len(result)}"
+                
+            log.info(f"✅ FINISHED: {func.__name__} in {duration:.2f}s{meta}")
+            return result
+        except Exception as e:
+            log.error(f"❌ FAILED: {func.__name__} after {time.time() - start_time:.2f}s with error: {str(e)}")
+            raise e
+    return wrapper
+
+
+def log_memory_usage(tag=""):
+    process = psutil.Process(os.getpid())
+    mem_gb = process.memory_info().rss / 1024 / 1024 / 1024
+    log.info(f"💾 RAM USAGE [{tag}]: {mem_gb:.2f} GB")
+
 warnings.filterwarnings("ignore")
 
 from sklearn.calibration import CalibratedClassifierCV
@@ -155,6 +217,7 @@ def make_engine(server: str, database: str):
 # --------------------
 # Data loading
 # --------------------
+@log_execution
 def load_modeling_data(engine, horizon_months: int = 12) -> pd.DataFrame:
     """
     Load only snapshots with COMPLETE labels: snapshot_date <= GETDATE() - horizon.
@@ -230,6 +293,7 @@ SELECT * FROM modeling;
     return df
 
 
+@log_execution
 def load_current_snapshot(engine) -> pd.DataFrame:
     """
     Load ONLY the most recent snapshot (today) for SCORING.
@@ -294,6 +358,7 @@ LEAKAGE_COLS = {
     "Target", "Eintritt", "Austritt", "snapshot_date", "DT_LoeschungAusfall"
 }
 
+@log_execution
 def temporal_feature_engineer(df: pd.DataFrame) -> pd.DataFrame:
     """Add Company_Age_Years feature. Other feature engineering handled by Lead-Gen preprocessor."""
     out = df.copy()
@@ -343,6 +408,7 @@ def gains_table(df_scores: pd.DataFrame, score_col="p_convert", target_col="Targ
 # --------------------
 # Split helpers
 # --------------------
+@log_execution
 def split_by_unique_dates(df: pd.DataFrame, date_col: str = "snapshot_date"):
     """Train = all but last 2 unique dates; Val = second-last; Test = last."""
     unique_dates = sorted(df[date_col].dropna().unique().tolist())
@@ -764,6 +830,7 @@ def checkpoint_exists():
 # Main
 # --------------------
 def main():
+    log_memory_usage("Start")
     log.info("=== Starting Lead Generation Model Training (refactored) ===")
     engine = make_engine(SERVER, DATABASE)
     log.info("DB connection OK")
@@ -777,6 +844,7 @@ def main():
     df_current = load_current_snapshot(engine)
     latest_snapshot = df_current["snapshot_date"].max()
     log.info(f"Current prospects loaded for snapshot: {latest_snapshot}")
+    log_memory_usage("After Data Load")
 
     # 2) Split modeling data by unique dates
     df_model = df_model.sort_values("snapshot_date").reset_index(drop=True)
@@ -794,6 +862,7 @@ def main():
     df_val_eng   = temporal_feature_engineer(df_val)
     df_test_eng  = temporal_feature_engineer(df_test)
     df_curr_eng  = temporal_feature_engineer(df_current)
+    log_memory_usage("After Feature Engineering")
 
     # 4) Optional: Validate preprocessor on sample data
     try:
@@ -930,6 +999,8 @@ def main():
 
         sampled_data = combined_data # For consistency
 
+    log_memory_usage("After Train/Val Prep")
+
     # Update scale_pos_weight for XGBoost if used
     if MODEL_BACKEND.startswith("xgb"):
         n_pos = np.sum(y_train_val)
@@ -1031,7 +1102,7 @@ def main():
             cv=tscv,
             n_jobs=N_JOBS_SEARCH,
             random_state=RANDOM_STATE,
-            verbose=1,
+            verbose=3,
             pre_dispatch=1,
             error_score="raise"  # fail fast to surface memory errors
         )
