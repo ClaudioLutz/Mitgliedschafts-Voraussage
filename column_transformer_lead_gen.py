@@ -52,6 +52,12 @@ class FeatureEngineeringTransformer:
         # Add PLZ grouping names
         if 'PLZ' in output_names:
             output_names.extend(['PLZ2', 'PLZ3'])
+
+        # Add NOGA hierarchy names
+        if 'BrancheCode_06' in output_names:
+            output_names.extend(['NOGA_section', 'NOGA_division', 'NOGA_group'])
+        if 'Kanton' in output_names and 'BrancheCode_06' in output_names:
+            output_names.append('Kanton_NOGA_section')
         
         # Add log transform names  
         skewed_cols = ['MitarbeiterBestand', 'Umsatz']
@@ -85,6 +91,31 @@ class FeatureEngineeringTransformer:
             # Keep NaN/invalid values as strings to avoid mixed types
             X_out['PLZ2'] = X_out['PLZ2'].replace('na', 'missing')
             X_out['PLZ3'] = X_out['PLZ3'].replace('na', 'missing')
+
+        # 2b. Add NOGA hierarchy + interaction features
+        if 'BrancheCode_06' in X_out.columns:
+            code = X_out['BrancheCode_06'].fillna('missing').astype(str).str.strip()
+            code = code.replace('nan', 'missing')
+            code = code.replace('missing', '')
+
+            section = code.str[0]
+            section = section.fillna('missing').replace('', 'missing')
+            X_out['NOGA_section'] = section
+
+            division = code.str.extract(r'^(\d{2})', expand=False)
+            group = code.str.extract(r'^(\d{3})', expand=False)
+            X_out['NOGA_division'] = division.fillna('missing')
+            X_out['NOGA_group'] = group.fillna('missing')
+        else:
+            X_out['NOGA_section'] = 'missing'
+            X_out['NOGA_division'] = 'missing'
+            X_out['NOGA_group'] = 'missing'
+
+        if 'Kanton' in X_out.columns:
+            kanton = X_out['Kanton'].fillna('missing').astype(str).replace('nan', 'missing')
+            X_out['Kanton_NOGA_section'] = kanton + "_" + X_out['NOGA_section'].astype(str)
+        else:
+            X_out['Kanton_NOGA_section'] = 'missing'
         
         # 3. Apply log transforms to skewed features
         skewed_cols = ['MitarbeiterBestand', 'Umsatz']
@@ -189,7 +220,11 @@ HIGH_CARD_CATEGORICAL_COLS = [
     'PLZ',           # Full PLZ for target encoding
     'PLZ2',          # Grouped PLZ (engineered)  
     'PLZ3',          # Grouped PLZ (engineered)
-    'BrancheCode_06' # Most granular industry code
+    'BrancheCode_06', # Most granular industry code
+    'NOGA_section',
+    'NOGA_division',
+    'NOGA_group',
+    'Kanton_NOGA_section'
 ]
 
 # Optional: Keep other industry codes only if they show extra signal

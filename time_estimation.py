@@ -23,6 +23,18 @@ try:
 except ImportError:
     HAVE_XGBOOST = False
 
+try:
+    from lightgbm import LGBMClassifier
+    HAVE_LIGHTGBM = True
+except ImportError:
+    HAVE_LIGHTGBM = False
+
+try:
+    from imblearn.ensemble import BalancedBaggingClassifier
+    HAVE_IMBLEARN_ENSEMBLE = True
+except Exception:
+    HAVE_IMBLEARN_ENSEMBLE = False
+
 from column_transformer_lead_gen import create_lead_gen_preprocessor, DROP_COLS, ToFloat32Transformer
 from training_lead_generation_model import temporal_feature_engineer
 
@@ -32,7 +44,7 @@ DATABASE = "CAG_Analyse"
 SCHEMA = "mitgliederstatistik"
 
 # Model Backend Configuration
-# Options: 'hgb' (default), 'xgb_gpu', 'xgb_cpu', 'dnn'
+# Options: 'hgb' (default), 'hgb_bagging', 'xgb_gpu', 'xgb_cpu', 'lgbm_gpu', 'lgbm_cpu', 'dnn'
 MODEL_BACKEND = os.environ.get("MODEL_BACKEND", "hgb").lower()
 
 HORIZON_MONTHS = 12
@@ -169,16 +181,40 @@ def main():
         to_float = ToFloat32Transformer()
 
         tree_method = "gpu_hist" if MODEL_BACKEND == "xgb_gpu" else "hist"
+        max_bin = 64 if MODEL_BACKEND == "xgb_gpu" else 256
 
-        clf = XGBClassifier(
-            tree_method=tree_method,
-            n_estimators=100, # Conservative for timing
+        clf_params = {
+            "tree_method": tree_method,
+            "n_estimators": 100, # Conservative for timing
+            "learning_rate": 0.1,
+            "max_depth": 6,
+            "objective": "binary:logistic",
+            "random_state": 42,
+            "max_bin": max_bin,
+            "n_jobs": 1, # Single thread estimate often safer for extrapolation
+        }
+        if MODEL_BACKEND == "xgb_gpu":
+            clf_params["sampling_method"] = "gradient_based"
+        clf = XGBClassifier(**clf_params)
+        pipe = Pipeline([("pre", pre), ("to_float", to_float), ("clf", clf)])
+
+    elif MODEL_BACKEND.startswith("lgbm"):
+        print(f"Estimating time for backend: {MODEL_BACKEND.upper()}")
+        if not HAVE_LIGHTGBM:
+            raise RuntimeError("LightGBM not installed.")
+
+        pre = create_lead_gen_preprocessor(onehot_sparse=True)
+        to_float = ToFloat32Transformer()
+
+        device = "gpu" if MODEL_BACKEND == "lgbm_gpu" else "cpu"
+        clf = LGBMClassifier(
+            n_estimators=200,
             learning_rate=0.1,
-            max_depth=6,
-            objective="binary:logistic",
+            num_leaves=63,
+            max_depth=7,
+            objective="binary",
             random_state=42,
-            max_bin=256,
-            n_jobs=1 # Single thread estimate often safer for extrapolation
+            device=device,
         )
         pipe = Pipeline([("pre", pre), ("to_float", to_float), ("clf", clf)])
 
@@ -203,6 +239,28 @@ def main():
             verbose=0,
         )
         pipe = Pipeline([("pre", pre), ("to_float", to_float), ("clf", clf)])
+
+    elif MODEL_BACKEND == "hgb_bagging":
+        print("Estimating time for backend: HGB BalancedBagging")
+        if not HAVE_IMBLEARN_ENSEMBLE:
+            raise RuntimeError("imbalanced-learn not installed for BalancedBagging.")
+
+        pre = create_lead_gen_preprocessor(onehot_sparse=False)
+        use_class_weight = Version(sklearn_version) >= Version("1.5")
+        base = HistGradientBoostingClassifier(
+            random_state=42,
+            early_stopping=False,
+            class_weight=("balanced" if use_class_weight else None),
+            max_iter=200,
+            max_depth=8,
+            min_samples_leaf=50,
+            l2_regularization=0.5,
+        )
+        try:
+            bagger = BalancedBaggingClassifier(estimator=base, n_estimators=10, random_state=42)
+        except TypeError:
+            bagger = BalancedBaggingClassifier(base_estimator=base, n_estimators=10, random_state=42)
+        pipe = Pipeline([("pre", pre), ("clf", bagger)])
 
     else:
         print("Estimating time for backend: HGB (Legacy)")

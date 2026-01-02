@@ -4,13 +4,14 @@
 # - Uses only snapshots with complete labels (<= today - horizon).
 # - Splits by unique snapshot dates; computes time-meaningful gap for TSCV.
 # - TargetEncoder inside pipeline (internal cross-fitting).
-# - ONE imbalance strategy: class_weight if available; else SMOTE.
+# - Imbalance strategies: class_weight (HGB), BalancedBagging, scale_pos_weight (XGB/LGBM), SMOTE fallback.
 # - Time-aware calibration via CalibratedClassifierCV(TimeSeriesSplit).
 # - Ranks current prospects (latest snapshot) without using labels.
 
 import os
 import sys
 import math
+import json
 import logging
 import warnings
 from datetime import datetime, timedelta
@@ -25,8 +26,9 @@ import urllib.parse
 from sklearn import __version__ as sklearn_version
 from packaging.version import Version
 
+from sklearn.base import clone
 from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
-from sklearn.metrics import average_precision_score
+from sklearn.metrics import average_precision_score, precision_recall_curve, brier_score_loss
 from sklearn.pipeline import Pipeline
 from sklearn.utils.class_weight import compute_class_weight
 
@@ -112,6 +114,20 @@ try:
 except ImportError:
     HAVE_XGBOOST = False
 
+# Optional: Beta calibration (betacal)
+try:
+    from betacal import BetaCalibration
+    HAVE_BETACAL = True
+except ImportError:
+    HAVE_BETACAL = False
+
+# Optional: LightGBM backend
+try:
+    from lightgbm import LGBMClassifier
+    HAVE_LIGHTGBM = True
+except ImportError:
+    HAVE_LIGHTGBM = False
+
 # Import new Lead-Gen preprocessor
 from column_transformer_lead_gen import create_lead_gen_preprocessor, DROP_COLS, validate_preprocessor, ToFloat32Transformer
 
@@ -124,8 +140,14 @@ try:
 except Exception:
     HAVE_IMBLEARN = False
 
+try:
+    from imblearn.ensemble import BalancedBaggingClassifier
+    HAVE_IMBLEARN_ENSEMBLE = True
+except Exception:
+    HAVE_IMBLEARN_ENSEMBLE = False
+
 # Model Backend Configuration
-# Options: 'hgb' (default), 'xgb_gpu', 'xgb_cpu', 'dnn'
+# Options: 'hgb' (default), 'hgb_bagging', 'xgb_gpu', 'xgb_cpu', 'lgbm_gpu', 'lgbm_cpu', 'dnn'
 MODEL_BACKEND = os.environ.get("MODEL_BACKEND", "hgb").lower()
 
 # Model persistence for checkpointing
@@ -172,6 +194,10 @@ BEST_PARAMS_XGB = {
 # Initial defaults for DNN (no search)
 BEST_PARAMS_DNN = {}
 
+# Optional defaults for LightGBM and BalancedBagging
+BEST_PARAMS_LGBM = {}
+BEST_PARAMS_HGB_BAGGING = {}
+
 # DNN default training configuration
 DNN_HIDDEN_UNITS = (128, 64)
 DNN_DROPOUT = 0.2
@@ -182,6 +208,21 @@ DNN_EPOCHS = 20
 DNN_PATIENCE = 3
 DNN_VALIDATION_SPLIT = 0.1
 DNN_VERBOSE = 0
+
+# Calibration + threshold optimization
+CALIBRATION_METHOD = os.environ.get("CALIBRATION_METHOD", "isotonic").lower()
+BETA_CALIBRATION_PARAMETERS = os.environ.get("BETA_CALIBRATION_PARAMETERS", "abm")
+THRESHOLD_BETA = float(os.environ.get("THRESHOLD_BETA", "2.0"))
+ENABLE_THRESHOLD_OPTIMIZATION = True
+
+# Imbalance handling parameters
+SMOTE_SAMPLING_STRATEGY = os.environ.get("SMOTE_SAMPLING_STRATEGY", "0.1")
+BALANCED_BAGGING_N_ESTIMATORS = int(os.environ.get("BALANCED_BAGGING_N_ESTIMATORS", "30"))
+BALANCED_BAGGING_SAMPLING_STRATEGY = os.environ.get("BALANCED_BAGGING_SAMPLING_STRATEGY", "auto")
+BALANCED_BAGGING_N_JOBS = int(os.environ.get("BALANCED_BAGGING_N_JOBS", "-1"))
+
+# LightGBM defaults (optional backend)
+LGBM_USE_UNBALANCE = os.environ.get("LGBM_USE_UNBALANCE", "true").lower() in {"1", "true", "yes"}
 
 
 # --------------------
@@ -494,6 +535,9 @@ def get_xgb_classifier(backend, random_state=42, scale_pos_weight=1.0):
     }
 
     if backend == "xgb_gpu":
+        # GPU-friendly defaults: reduce binning and enable gradient-based sampling
+        common_params["max_bin"] = 64
+        common_params["sampling_method"] = "gradient_based"
         return XGBClassifier(
             tree_method="gpu_hist",
             **common_params
@@ -559,6 +603,245 @@ def get_dnn_classifier(
         random_state=random_state,
         verbose=verbose,
     )
+
+
+def parse_sampling_strategy(value):
+    """Parse sampling strategy values from env/config into usable types."""
+    if isinstance(value, (float, int)):
+        return value
+    if value is None:
+        return value
+    value_str = str(value).strip().lower()
+    if value_str in {"auto", "minority", "majority"}:
+        return value_str
+    try:
+        return float(value_str)
+    except ValueError:
+        return value
+
+
+def hgb_supports_class_weight() -> bool:
+    """Return True if HistGradientBoostingClassifier supports class_weight."""
+    params = inspect.signature(HistGradientBoostingClassifier).parameters
+    return "class_weight" in params
+
+
+def make_hgb_classifier(
+    random_state: int,
+    class_weight=None,
+    **kwargs,
+):
+    """Create an HGB classifier with safe class_weight handling."""
+    params = {
+        "random_state": random_state,
+        "early_stopping": False,
+        "max_depth": None,
+        "max_leaf_nodes": 31,
+        "min_samples_leaf": 20,
+        "l2_regularization": 0.1,
+    }
+    params.update(kwargs)
+    if class_weight is not None and hgb_supports_class_weight():
+        params["class_weight"] = class_weight
+    return HistGradientBoostingClassifier(**params)
+
+
+def get_balanced_bagging_estimator_param_name() -> str:
+    """Return estimator parameter name for BalancedBaggingClassifier across versions."""
+    if not HAVE_IMBLEARN_ENSEMBLE:
+        return "estimator"
+    params = inspect.signature(BalancedBaggingClassifier).parameters
+    return "estimator" if "estimator" in params else "base_estimator"
+
+
+def make_balanced_bagging_classifier(
+    base_estimator,
+    n_estimators: int,
+    sampling_strategy,
+    random_state: int,
+    n_jobs: int,
+):
+    if not HAVE_IMBLEARN_ENSEMBLE:
+        raise RuntimeError("imbalanced-learn ensemble is not available.")
+    estimator_param = get_balanced_bagging_estimator_param_name()
+    kwargs = {
+        estimator_param: base_estimator,
+        "n_estimators": n_estimators,
+        "sampling_strategy": sampling_strategy,
+        "random_state": random_state,
+    }
+    if n_jobs is not None:
+        kwargs["n_jobs"] = n_jobs
+    return BalancedBaggingClassifier(**kwargs)
+
+
+def get_lgbm_classifier(backend, random_state=42, scale_pos_weight=1.0):
+    """Factory to create LightGBM classifier with GPU-friendly defaults."""
+    if not HAVE_LIGHTGBM:
+        raise RuntimeError("LightGBM is not installed. Please install 'lightgbm'.")
+
+    params = {
+        "n_estimators": 800,
+        "learning_rate": 0.05,
+        "num_leaves": 127,
+        "max_depth": 7,
+        "subsample": 0.7,
+        "colsample_bytree": 0.8,
+        "random_state": random_state,
+        "n_jobs": -1,
+        "objective": "binary",
+    }
+
+    if backend == "lgbm_gpu":
+        params["device"] = "gpu"
+        params["max_bin"] = 63
+    else:
+        params["device"] = "cpu"
+
+    if LGBM_USE_UNBALANCE:
+        params["is_unbalance"] = True
+    else:
+        params["scale_pos_weight"] = scale_pos_weight
+
+    return LGBMClassifier(**params)
+
+
+def optimize_threshold_fbeta(y_true: np.ndarray, y_score: np.ndarray, beta: float = 2.0):
+    """Find threshold that maximizes F-beta."""
+    precision, recall, thresholds = precision_recall_curve(y_true, y_score)
+    if thresholds.size == 0:
+        return 0.5, float("nan")
+    thresholds = np.concatenate([thresholds, [1.0]])
+    beta_sq = beta ** 2
+    f_beta = (1 + beta_sq) * (precision * recall) / (beta_sq * precision + recall + 1e-12)
+    best_idx = int(np.nanargmax(f_beta))
+    return float(thresholds[best_idx]), float(f_beta[best_idx])
+
+
+def threshold_for_top_k(y_score: np.ndarray, k: int) -> float:
+    """Return the score threshold corresponding to the top-k highest scores."""
+    scores = np.asarray(y_score)
+    scores = scores[np.isfinite(scores)]
+    if scores.size == 0:
+        return 1.0
+    k = int(min(max(k, 0), scores.size))
+    if k <= 0:
+        return 1.0
+    return float(np.partition(scores, -k)[-k])
+
+
+def metrics_at_threshold(y_true: np.ndarray, y_score: np.ndarray, threshold: float, beta: float = 2.0):
+    """Compute precision/recall/F-beta at a fixed threshold."""
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_score) >= threshold
+    tp = int(np.sum((y_true == 1) & (y_pred == 1)))
+    fp = int(np.sum((y_true == 0) & (y_pred == 1)))
+    fn = int(np.sum((y_true == 1) & (y_pred == 0)))
+
+    precision = tp / max(tp + fp, 1)
+    recall = tp / max(tp + fn, 1)
+    beta_sq = beta ** 2
+    f_beta = (1 + beta_sq) * (precision * recall) / max(beta_sq * precision + recall, 1e-12)
+
+    return {
+        "threshold": float(threshold),
+        "precision": float(precision),
+        "recall": float(recall),
+        "f_beta": float(f_beta),
+        "support": int(len(y_true)),
+        "positives": int(np.sum(y_true == 1)),
+        "predicted_positives": int(np.sum(y_pred)),
+    }
+
+
+def class_stratified_brier(y_true: np.ndarray, y_score: np.ndarray):
+    """Compute separate Brier scores for positives and negatives."""
+    y_true = np.asarray(y_true)
+    y_score = np.asarray(y_score)
+    pos_mask = y_true == 1
+    neg_mask = y_true == 0
+
+    bs_pos = float(np.mean((y_score[pos_mask] - 1.0) ** 2)) if np.any(pos_mask) else float("nan")
+    bs_neg = float(np.mean((y_score[neg_mask] - 0.0) ** 2)) if np.any(neg_mask) else float("nan")
+    return bs_pos, bs_neg
+
+
+def ece_at_k(y_true: np.ndarray, y_score: np.ndarray, k: int, n_bins: int = 10):
+    """Expected calibration error on the top-k scored samples."""
+    y_true = np.asarray(y_true)
+    y_score = np.asarray(y_score)
+    if y_score.size == 0 or k <= 0:
+        return float("nan")
+
+    order = np.argsort(-y_score)
+    top_idx = order[: min(k, len(order))]
+    y_top = y_true[top_idx]
+    p_top = y_score[top_idx]
+    bins = np.linspace(0.0, 1.0, n_bins + 1)
+    ece = 0.0
+    for i in range(n_bins):
+        if i == n_bins - 1:
+            mask = (p_top >= bins[i]) & (p_top <= bins[i + 1])
+        else:
+            mask = (p_top >= bins[i]) & (p_top < bins[i + 1])
+        if not np.any(mask):
+            continue
+        bin_frac = np.sum(mask) / max(len(p_top), 1)
+        avg_pred = float(np.mean(p_top[mask]))
+        avg_true = float(np.mean(y_top[mask]))
+        ece += bin_frac * abs(avg_pred - avg_true)
+    return float(ece)
+
+
+def _safe_index(X, idx):
+    """Index X with numpy indices for pandas or numpy arrays."""
+    if hasattr(X, "iloc"):
+        return X.iloc[idx]
+    return X[idx]
+
+
+class BetaCalibratedModel:
+    """Wrapper to apply BetaCalibration to a fitted probabilistic estimator."""
+
+    def __init__(self, estimator, calibrator):
+        self.estimator = estimator
+        self.calibrator = calibrator
+        self.classes_ = getattr(estimator, "classes_", np.array([0, 1]))
+
+    def predict_proba(self, X):
+        proba = self.estimator.predict_proba(X)[:, 1]
+        calibrated = self.calibrator.predict(proba)
+        calibrated = np.clip(calibrated, 0.0, 1.0)
+        return np.column_stack([1.0 - calibrated, calibrated])
+
+    def predict(self, X):
+        return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
+
+
+def fit_beta_calibrated_model(estimator, X, y, cv):
+    """Fit BetaCalibration using out-of-fold predictions for leakage-safe calibration."""
+    if not HAVE_BETACAL:
+        raise RuntimeError("betacal is not installed.")
+
+    oof_pred = np.full(len(y), np.nan, dtype=float)
+    for train_idx, val_idx in cv.split(X):
+        est = clone(estimator)
+        X_train = _safe_index(X, train_idx)
+        y_train = np.asarray(y)[train_idx]
+        X_val = _safe_index(X, val_idx)
+
+        est.fit(X_train, y_train)
+        oof_pred[val_idx] = est.predict_proba(X_val)[:, 1]
+
+    valid_mask = np.isfinite(oof_pred)
+    if np.sum(valid_mask) < 10:
+        raise RuntimeError("Not enough calibration samples for beta calibration.")
+
+    calibrator = BetaCalibration(parameters=BETA_CALIBRATION_PARAMETERS)
+    calibrator.fit(oof_pred[valid_mask], np.asarray(y)[valid_mask])
+
+    estimator.fit(X, y)
+    return BetaCalibratedModel(estimator=estimator, calibrator=calibrator)
 
 def stratified_sample_large_dataset(df: pd.DataFrame, target_col: str, max_samples: int, random_state: int = 42) -> pd.DataFrame:
     """
@@ -950,19 +1233,11 @@ def main():
     # Determine configuration based on backend
     if MODEL_BACKEND.startswith("xgb"):
         # XGBoost path: Sparse output + Float32 + scale_pos_weight
-        log.info(f"🔧 Using {MODEL_BACKEND.upper()} backend.")
+        log.info(f"Using {MODEL_BACKEND.upper()} backend.")
 
         # Preprocessor: Sparse OHE, Float32 output preferred
         pre = create_lead_gen_preprocessor(onehot_sparse=True)
-        log.info("🔧 Using Lead-Gen ColumnTransformer (Sparse Mode, Float32)")
-
-        # Calculate scale_pos_weight for imbalance
-        # We need to estimate it from the training data distribution roughly
-        # Or let the search find it? Usually scale_pos_weight ~ neg/pos
-        # We'll compute it exactly from the loaded data momentarily,
-        # but here we initialize the model. We can set it later or pass a placeholder.
-        # Since we haven't filtered to X_train_val yet, we can't compute exact ratio easily here.
-        # We will update it before fitting or search.
+        log.info("Using Lead-Gen ColumnTransformer (Sparse Mode, Float32)")
 
         clf = get_xgb_classifier(MODEL_BACKEND, random_state=RANDOM_STATE, scale_pos_weight=1.0)
 
@@ -974,7 +1249,26 @@ def main():
             ("classifier", clf)
         ]
         PipelineClass = Pipeline
-        log.info(f"Imbalance handling via XGBoost scale_pos_weight (no SMOTE).")
+        log.info("Imbalance handling via XGBoost scale_pos_weight (no SMOTE).")
+
+    elif MODEL_BACKEND.startswith("lgbm"):
+        log.info(f"Using {MODEL_BACKEND.upper()} backend.")
+
+        pre = create_lead_gen_preprocessor(onehot_sparse=True)
+        log.info("Using Lead-Gen ColumnTransformer (Sparse Mode, Float32)")
+
+        clf = get_lgbm_classifier(MODEL_BACKEND, random_state=RANDOM_STATE, scale_pos_weight=1.0)
+
+        steps = [
+            ("preprocessor", pre),
+            ("to_float32", ToFloat32Transformer()),
+            ("classifier", clf)
+        ]
+        PipelineClass = Pipeline
+        if LGBM_USE_UNBALANCE:
+            log.info("Imbalance handling via LightGBM is_unbalance.")
+        else:
+            log.info("Imbalance handling via LightGBM scale_pos_weight.")
 
     elif MODEL_BACKEND == "dnn":
         log.info("Using DNN backend.")
@@ -991,22 +1285,49 @@ def main():
         PipelineClass = Pipeline
         log.info("Imbalance handling via class_weight passed to DNN (set after sampling).")
 
+    elif MODEL_BACKEND == "hgb_bagging":
+        if not HAVE_IMBLEARN_ENSEMBLE:
+            raise RuntimeError("imbalanced-learn not installed; needed for BalancedBagging.")
+        pre = create_lead_gen_preprocessor(onehot_sparse=False)
+        log.info("Using Lead-Gen ColumnTransformer with engineered features (BalancedBagging).")
+
+        base_estimator = make_hgb_classifier(
+            random_state=RANDOM_STATE,
+            class_weight="balanced",
+            max_iter=200,
+            learning_rate=0.05,
+            max_depth=8,
+            min_samples_leaf=50,
+            l2_regularization=0.5,
+        )
+
+        clf = make_balanced_bagging_classifier(
+            base_estimator=base_estimator,
+            n_estimators=BALANCED_BAGGING_N_ESTIMATORS,
+            sampling_strategy=parse_sampling_strategy(BALANCED_BAGGING_SAMPLING_STRATEGY),
+            random_state=RANDOM_STATE,
+            n_jobs=BALANCED_BAGGING_N_JOBS,
+        )
+
+        steps = [("preprocessor", pre), ("classifier", clf)]
+        PipelineClass = Pipeline
+        log.info("Imbalance handling via BalancedBagging (undersampling).")
+
     else:
         # HGB (Legacy) path
         pre = create_lead_gen_preprocessor(onehot_sparse=False)
-        log.info("🔧 Using Lead-Gen ColumnTransformer with engineered features")
+        log.info("Using Lead-Gen ColumnTransformer with engineered features")
 
         # 6) Estimator & imbalance strategy
         #    Choose ONE: class_weight if supported (sklearn >= 1.5), else SMOTE
         if USE_CLASS_WEIGHT:
-            clf = HistGradientBoostingClassifier(
+            clf = make_hgb_classifier(
                 random_state=RANDOM_STATE,
-                early_stopping=False,
                 class_weight="balanced",
                 max_depth=None,
                 max_leaf_nodes=31,
                 min_samples_leaf=20,
-                l2_regularization=0.1
+                l2_regularization=0.1,
             )
             steps = [("preprocessor", pre), ("classifier", clf)]
             PipelineClass = Pipeline  # standard sklearn pipeline
@@ -1014,15 +1335,19 @@ def main():
         else:
             if not HAVE_IMBLEARN:
                 raise RuntimeError("imbalanced-learn not installed; install or upgrade scikit-learn to >=1.5 for class_weight.")
-            clf = HistGradientBoostingClassifier(
+            clf = make_hgb_classifier(
                 random_state=RANDOM_STATE,
-                early_stopping=False,
+                class_weight=None,
                 max_depth=None,
                 max_leaf_nodes=31,
                 min_samples_leaf=20,
-                l2_regularization=0.1
+                l2_regularization=0.1,
             )
-            steps = [("preprocessor", pre), ("smote", SMOTE(random_state=RANDOM_STATE)), ("classifier", clf)]
+            steps = [
+                ("preprocessor", pre),
+                ("smote", SMOTE(random_state=RANDOM_STATE, sampling_strategy=parse_sampling_strategy(SMOTE_SAMPLING_STRATEGY))),
+                ("classifier", clf)
+            ]
             PipelineClass = ImbPipeline  # imbalanced-learn pipeline
             log.info("Imbalance via SMOTE (no class_weight).")
 
@@ -1087,14 +1412,18 @@ def main():
 
     log_memory_usage("After Train/Val Prep")
 
-    # Update scale_pos_weight for XGBoost if used
-    if MODEL_BACKEND.startswith("xgb"):
+    # Update scale_pos_weight for XGBoost/LightGBM if used
+    ratio = None
+    if MODEL_BACKEND.startswith("xgb") or (MODEL_BACKEND.startswith("lgbm") and not LGBM_USE_UNBALANCE):
         n_pos = np.sum(y_train_val)
         n_neg = len(y_train_val) - n_pos
         ratio = n_neg / max(n_pos, 1)
         log.info(f"Calculated scale_pos_weight: {ratio:.4f} (Neg={n_neg}, Pos={n_pos})")
         # Update the parameter in the pipeline
-        pipe.set_params(classifier__scale_pos_weight=ratio)
+        if MODEL_BACKEND.startswith("xgb"):
+            pipe.set_params(classifier__scale_pos_weight=ratio)
+        elif MODEL_BACKEND.startswith("lgbm") and not LGBM_USE_UNBALANCE:
+            pipe.set_params(classifier__scale_pos_weight=ratio)
 
     if MODEL_BACKEND == "dnn":
         classes = np.unique(y_train_val)
@@ -1117,8 +1446,16 @@ def main():
             if "classifier__scale_pos_weight" not in current_best_params:
                 current_best_params = current_best_params.copy()
                 current_best_params["classifier__scale_pos_weight"] = ratio
+        elif MODEL_BACKEND.startswith("lgbm"):
+            current_best_params = BEST_PARAMS_LGBM
+            if not LGBM_USE_UNBALANCE and ratio is not None:
+                if "classifier__scale_pos_weight" not in current_best_params:
+                    current_best_params = current_best_params.copy()
+                    current_best_params["classifier__scale_pos_weight"] = ratio
         elif MODEL_BACKEND == "dnn":
             current_best_params = BEST_PARAMS_DNN
+        elif MODEL_BACKEND == "hgb_bagging":
+            current_best_params = BEST_PARAMS_HGB_BAGGING
         else:
             current_best_params = BEST_PARAMS_HGB
 
@@ -1170,6 +1507,28 @@ def main():
                 "classifier__colsample_bytree": [0.6, 0.8, 1.0],
                 "classifier__reg_lambda": [0.1, 1.0, 5.0],
                 "classifier__gamma": [0.0, 0.1, 1.0],
+            }
+        elif MODEL_BACKEND.startswith("lgbm"):
+            # LightGBM Search Space (keep compact)
+            param_distributions = {
+                "classifier__learning_rate": np.logspace(-2.3, -0.7, 6),
+                "classifier__n_estimators": [400, 800, 1200],
+                "classifier__num_leaves": [31, 63, 127],
+                "classifier__max_depth": [5, 7, 9],
+                "classifier__subsample": [0.6, 0.8, 1.0],
+                "classifier__colsample_bytree": [0.6, 0.8, 1.0],
+                "classifier__min_child_samples": [20, 50, 100],
+            }
+        elif MODEL_BACKEND == "hgb_bagging":
+            # BalancedBagging Search Space (base estimator params)
+            estimator_param = get_balanced_bagging_estimator_param_name()
+            param_distributions = {
+                "classifier__n_estimators": [20, 30, 40],
+                f"classifier__{estimator_param}__learning_rate": np.logspace(-2.0, -0.7, 4),
+                f"classifier__{estimator_param}__max_iter": [200, 300],
+                f"classifier__{estimator_param}__max_depth": [6, 8, None],
+                f"classifier__{estimator_param}__min_samples_leaf": [20, 50],
+                f"classifier__{estimator_param}__l2_regularization": [0.1, 0.5, 1.0],
             }
         elif MODEL_BACKEND == "dnn":
             # DNN Search Space (keep small; early stopping controls training time)
@@ -1235,13 +1594,31 @@ def main():
     
     os.makedirs(ARTIFACTS_DIR, exist_ok=True)
 
-    calibrated = make_calibrated_classifier(
-        estimator=search.best_estimator_,
-        method="isotonic",   # or "sigmoid" if you prefer and have enough data
-        cv=cal_cv
-    )
-    
-    calibrated.fit(X_train_val, y_train_val)
+    calibration_method = CALIBRATION_METHOD
+    if calibration_method not in {"isotonic", "sigmoid", "beta"}:
+        log.warning(f"Unknown calibration method '{CALIBRATION_METHOD}', defaulting to isotonic.")
+        calibration_method = "isotonic"
+
+    if calibration_method == "beta":
+        if not HAVE_BETACAL:
+            log.warning("Beta calibration requested but betacal not installed; falling back to isotonic.")
+            calibration_method = "isotonic"
+        else:
+            log.info("Calibrating with beta calibration (out-of-fold time-series predictions).")
+            calibrated = fit_beta_calibrated_model(
+                estimator=search.best_estimator_,
+                X=X_train_val,
+                y=y_train_val,
+                cv=cal_cv
+            )
+
+    if calibration_method in {"isotonic", "sigmoid"}:
+        calibrated = make_calibrated_classifier(
+            estimator=search.best_estimator_,
+            method=calibration_method,
+            cv=cal_cv
+        )
+        calibrated.fit(X_train_val, y_train_val)
 
     # Save calibrated model for future use without re-calibration
     try:
@@ -1256,6 +1633,30 @@ def main():
     except Exception as e:
         log.warning(f"Failed to save calibrated model: {e}")
 
+    # 9b) Threshold optimization on validation snapshot
+    X_val = df_val_eng[feature_cols]
+    y_val = df_val["Target"].values
+    p_val = calibrated.predict_proba(X_val)[:, 1]
+    ap_val = average_precision_score(y_val, p_val)
+    p_at_k_val = precision_at_k(y_val, p_val, LEAD_CAPACITY_K)
+
+    log.info(f"VAL AP (PR-AUC): {ap_val:.5f}")
+    log.info(f"VAL Precision@{LEAD_CAPACITY_K}: {p_at_k_val:.5f}")
+
+    if ENABLE_THRESHOLD_OPTIMIZATION:
+        fbeta_threshold, fbeta_best = optimize_threshold_fbeta(y_val, p_val, beta=THRESHOLD_BETA)
+    else:
+        fbeta_threshold, fbeta_best = 0.5, float("nan")
+
+    topk_threshold = threshold_for_top_k(p_val, LEAD_CAPACITY_K)
+    val_fbeta_metrics = metrics_at_threshold(y_val, p_val, fbeta_threshold, beta=THRESHOLD_BETA)
+    val_topk_metrics = metrics_at_threshold(y_val, p_val, topk_threshold, beta=THRESHOLD_BETA)
+    val_brier = brier_score_loss(y_val, p_val)
+    val_bs_pos, val_bs_neg = class_stratified_brier(y_val, p_val)
+    val_ece = ece_at_k(y_val, p_val, LEAD_CAPACITY_K)
+
+    log.info(f"VAL F{THRESHOLD_BETA:.1f} optimal threshold: {fbeta_threshold:.6f} (score={fbeta_best:.6f})")
+    log.info(f"VAL Top-K threshold (K={LEAD_CAPACITY_K}): {topk_threshold:.6f}")
     # 10) Evaluate on Test (chronologically last unique date)
     X_test = df_test_eng[feature_cols]
     y_test = df_test["Target"].values
@@ -1265,6 +1666,51 @@ def main():
 
     log.info(f"TEST AP (PR-AUC): {ap_test:.5f}")
     log.info(f"TEST Precision@{LEAD_CAPACITY_K}: {p_at_k:.5f}")
+
+    test_fbeta_metrics = metrics_at_threshold(y_test, p_test, fbeta_threshold, beta=THRESHOLD_BETA)
+    test_topk_metrics = metrics_at_threshold(y_test, p_test, topk_threshold, beta=THRESHOLD_BETA)
+    test_brier = brier_score_loss(y_test, p_test)
+    test_bs_pos, test_bs_neg = class_stratified_brier(y_test, p_test)
+    test_ece = ece_at_k(y_test, p_test, LEAD_CAPACITY_K)
+
+    log.info(f"TEST F{THRESHOLD_BETA:.1f} at val-opt threshold: {test_fbeta_metrics['f_beta']:.6f}")
+    log.info(f"TEST Top-K threshold precision: {test_topk_metrics['precision']:.6f}")
+
+    threshold_report = {
+        "calibration_method": calibration_method,
+        "fbeta_beta": THRESHOLD_BETA,
+        "fbeta_threshold": fbeta_threshold,
+        "top_k_threshold": topk_threshold,
+        "k": LEAD_CAPACITY_K,
+        "validation": {
+            "ap": ap_val,
+            "precision_at_k": p_at_k_val,
+            "fbeta_metrics": val_fbeta_metrics,
+            "topk_metrics": val_topk_metrics,
+            "brier": val_brier,
+            "brier_pos": val_bs_pos,
+            "brier_neg": val_bs_neg,
+            "ece_at_k": val_ece,
+        },
+        "test": {
+            "ap": ap_test,
+            "precision_at_k": p_at_k,
+            "fbeta_metrics": test_fbeta_metrics,
+            "topk_metrics": test_topk_metrics,
+            "brier": test_brier,
+            "brier_pos": test_bs_pos,
+            "brier_neg": test_bs_neg,
+            "ece_at_k": test_ece,
+        },
+    }
+
+    try:
+        thresholds_path = os.path.join(ARTIFACTS_DIR, "thresholds.json")
+        with open(thresholds_path, "w", encoding="utf-8") as handle:
+            json.dump(threshold_report, handle, indent=2, ensure_ascii=True)
+        log.info(f"Saved threshold report to {thresholds_path}")
+    except Exception as e:
+        log.warning(f"Failed to save threshold report: {e}")
 
     # Gains table on test
     gt = gains_table(pd.DataFrame({"Target": y_test, "p_convert": p_test}))
