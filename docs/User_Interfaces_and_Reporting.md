@@ -7,7 +7,7 @@ This document describes the current state of user interfaces and reporting for t
 There is currently no graphical user interface (GUI) for this project. All interactions are performed by running Python scripts from the command line.
 
 - **Main Script:** `training_lead_generation_model.py` is the primary script for training the model and generating predictions.
-- **Utility Script:** `time_estimation.py` is a helper script to estimate the runtime of a full training cycle.
+- **Utility Script:** `time_estimation.py` estimates the runtime of a full training cycle using the same preprocessing pipeline and temporal feature step as training.
 
 ## Data Sources
 

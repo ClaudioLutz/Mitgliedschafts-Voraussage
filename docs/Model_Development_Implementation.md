@@ -24,25 +24,20 @@ This function loads the most recent snapshot of company data, which represents t
 After loading the data, a series of feature engineering and preprocessing steps are applied.
 
 ### Temporal Feature Engineering
-The `temporal_feature_engineer` function creates time-dependent features:
+The `temporal_feature_engineer` function only adds:
 
 - **`Company_Age_Years`**: Calculated as the difference between the snapshot year and the company's founding year.
-- **`Has_Employees`**: A binary flag indicating if the company has a non-zero number of employees.
-- **`Has_Revenue`**: A binary flag indicating if the company has non-zero revenue.
 
-### Automatic Column Grouping
-The `auto_column_groups` function categorizes the columns for preprocessing:
+All other feature engineering is handled inside the lead-gen preprocessor.
 
-- **Numeric Columns**: Columns with numeric data types.
-- **Low-Cardinality Categorical Columns**: Non-numeric columns with a small number of unique values (<= 20 by default), suitable for one-hot encoding.
-- **High-Cardinality Categorical Columns**: Non-numeric columns with many unique values, handled with target encoding.
+### Lead-Gen Preprocessing (`column_transformer_lead_gen.py`)
+The preprocessing pipeline is centralized in `column_transformer_lead_gen.py` and created via `create_lead_gen_preprocessor`. It uses explicit column lists and applies:
 
-### Preprocessing Pipeline
-A `ColumnTransformer` is used to apply different preprocessing steps to each column group:
-
-- **Numeric**: Missing values are imputed with the median.
-- **Low-Cardinality Categorical**: Features are one-hot encoded.
-- **High-Cardinality Categorical**: Features are target encoded to prevent creating an excessive number of new columns. The implementation uses the `TargetEncoder` from scikit-learn (if available), which has built-in cross-fitting to prevent target leakage.
+- **Feature engineering**: Missing indicators for key metrics, PLZ grouping, and log transforms.
+- **Numeric**: Median imputation + power transform for skew.
+- **Ordinal**: Median imputation of ordered categories.
+- **Low-Cardinality Categorical**: One-hot encoding with rare category grouping.
+- **High-Cardinality Categorical**: Target encoding with internal cross-fitting (sklearn if available, otherwise `category_encoders`).
 
 ## 3. Model Training and Hyperparameter Tuning
 

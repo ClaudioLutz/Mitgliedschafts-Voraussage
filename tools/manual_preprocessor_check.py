@@ -9,6 +9,13 @@ to ensure it works correctly before integration.
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+import os
+import sys
+
+# Add repo root to path so local imports work when running from tools/
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.append(REPO_ROOT)
+
 from column_transformer_lead_gen import create_lead_gen_preprocessor, validate_preprocessor
 
 def create_sample_data(n_samples=1000):
@@ -252,6 +259,5 @@ if __name__ == "__main__":
         test_specific_features()
         print(f"\n✅ SUCCESS: Lead-Gen ColumnTransformer is ready!")
         print("   → You can now integrate it into your training pipeline")
-        print("   → See integration_guide.py for step-by-step instructions")
     else:
         print(f"\n❌ FAILED: Please fix the issues above before integration")

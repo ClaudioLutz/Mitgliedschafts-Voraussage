@@ -5,8 +5,6 @@
 import time
 import math
 import urllib.parse
-from datetime import datetime
-import numpy as np
 import pandas as pd
 
 from packaging.version import Version
@@ -14,17 +12,11 @@ from sqlalchemy import create_engine, URL, text
 
 # --- scikit-learn bits
 from sklearn import __version__ as sklearn_version
-from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder
-from sklearn.impute import SimpleImputer
 from sklearn.ensemble import HistGradientBoostingClassifier
 
-# Prefer sklearn TargetEncoder; fallback to category_encoders if missing
-try:
-    from sklearn.preprocessing import TargetEncoder  # sklearn >= 1.3
-except Exception:
-    from category_encoders.target_encoder import TargetEncoder  # type: ignore
+from column_transformer_lead_gen import create_lead_gen_preprocessor, DROP_COLS
+from training_lead_generation_model import temporal_feature_engineer
 
 # ----------------- CONFIG -----------------
 SERVER = "PRODSVCREPORT70"
@@ -37,8 +29,6 @@ N_ITER = 5                # matches your training
 N_SPLITS = 4               # time-series CV folds in your training
 CAL_SPLITS = 3             # calibration folds
 # -----------------------------------------
-
-LEAKAGE_COLS = {"Target", "Eintritt", "Austritt", "snapshot_date"}
 
 def make_engine(server: str, database: str):
     # SQLAlchemy + pyodbc with URL.create and odbc_connect
@@ -137,30 +127,6 @@ ORDER BY NEWID();  -- random sample
 """
     return pd.read_sql_query(text(q), engine, parse_dates=["snapshot_date", "Eintritt", "Austritt"])
 
-def temporal_feature_engineer(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    if "snapshot_date" not in out or "Gruendung_Jahr" not in out:
-        return out
-    snap_year = out["snapshot_date"].dt.year
-    out["Company_Age_Years"] = (snap_year - out["Gruendung_Jahr"].fillna(snap_year)).clip(lower=0)
-    out["Has_Employees"] = (out.get("MitarbeiterBestand", pd.Series(0)).fillna(0) > 0).astype(int)
-    out["Has_Revenue"] = (out.get("Umsatz", pd.Series(0)).fillna(0) > 0).astype(int)
-    return out
-
-def auto_column_groups(df: pd.DataFrame, high_card_threshold: int = 20):
-    cols = [c for c in df.columns if c not in LEAKAGE_COLS]
-    num_cols, cat_cols = [], []
-    for c in cols:
-        if pd.api.types.is_numeric_dtype(df[c]):
-            num_cols.append(c)
-        else:
-            cat_cols.append(c)
-    low_card, high_card = [], []
-    for c in cat_cols:
-        nunique = df[c].nunique(dropna=True)
-        (low_card if nunique <= high_card_threshold else high_card).append(c)
-    return num_cols, low_card, high_card
-
 def main():
     print("Connecting to DB…")
     engine = make_engine(SERVER, DATABASE)
@@ -178,22 +144,10 @@ def main():
     df = temporal_feature_engineer(df)
 
     y = df["Target"].to_numpy()
-    X = df.drop(columns=list(LEAKAGE_COLS))
+    feature_cols = [col for col in df.columns if col not in DROP_COLS]
+    X = df[feature_cols].copy()
 
-    # Column groups
-    num_cols, low_cat_cols, high_cat_cols = auto_column_groups(df)
-
-    # OneHotEncoder: version-safe flag
-    try:
-        ohe = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-    except TypeError:
-        ohe = OneHotEncoder(handle_unknown="ignore", sparse=False)
-
-    pre = ColumnTransformer([
-        ("num", Pipeline([("impute", SimpleImputer(strategy="median"))]), num_cols),
-        ("lowcat", Pipeline([("ohe", ohe)]), low_cat_cols),
-        ("highcat", Pipeline([("te", TargetEncoder())]), high_cat_cols),
-    ], remainder="drop", sparse_threshold=0.3)
+    pre = create_lead_gen_preprocessor()
 
     # Pick ONE imbalance strategy: class_weight if available in this sklearn, else none (since this is only a probe)
     use_class_weight = Version(sklearn_version) >= Version("1.5")

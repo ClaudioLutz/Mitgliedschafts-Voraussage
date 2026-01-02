@@ -10,8 +10,9 @@ from datetime import datetime, timedelta
 import sys
 import os
 
-# Add the current directory to path to import our functions
-sys.path.append('.')
+# Add repo root to path so local imports work when running from tools/
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.append(REPO_ROOT)
 
 # Import the enhanced sampling functions
 from training_lead_generation_model import (

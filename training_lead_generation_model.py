@@ -26,10 +26,7 @@ from packaging.version import Version
 
 from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
 from sklearn.metrics import average_precision_score
-from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, FunctionTransformer
-from sklearn.impute import SimpleImputer
 
 # --------------------
 # Logging setup (must be before any log.warning calls)
@@ -40,14 +37,6 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 warnings.filterwarnings("ignore")
-
-# TargetEncoder: prefer sklearn (has internal cross-fitting); fallback to category_encoders.
-try:
-    from sklearn.preprocessing import TargetEncoder  # sklearn >= 1.3
-    SKLEARN_TARGET_ENCODER = True
-except Exception:
-    SKLEARN_TARGET_ENCODER = False
-    from category_encoders.target_encoder import TargetEncoder  # type: ignore
 
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import HistGradientBoostingClassifier
@@ -280,35 +269,6 @@ WHERE
 LEAKAGE_COLS = {
     "Target", "Eintritt", "Austritt", "snapshot_date", "DT_LoeschungAusfall"
 }
-
-def auto_column_groups(df: pd.DataFrame,
-                       high_card_threshold: int = 20,
-                       numeric_override: list[str] | None = None):
-    """Infer numeric/low-card/high-card categorical columns; drop leakage columns."""
-    cols = [c for c in df.columns if c not in LEAKAGE_COLS]
-    if numeric_override is None:
-        numeric_override = []
-
-    num_cols, cat_cols = [], []
-    for c in cols:
-        if c in numeric_override:
-            num_cols.append(c)
-        elif pd.api.types.is_numeric_dtype(df[c]):
-            num_cols.append(c)
-        else:
-            cat_cols.append(c)
-
-    # split categoricals by cardinality
-    low_card, high_card = [], []
-    for c in cat_cols:
-        nunique = df[c].nunique(dropna=True)
-        if nunique <= high_card_threshold:
-            low_card.append(c)
-        else:
-            high_card.append(c)
-
-    return num_cols, low_card, high_card
-
 
 def temporal_feature_engineer(df: pd.DataFrame) -> pd.DataFrame:
     """Add Company_Age_Years feature. Other feature engineering handled by Lead-Gen preprocessor."""
@@ -774,7 +734,7 @@ def main():
              f"| Test: {len(df_test):,} (pos rate={rate(df_test):.4f})")
 
     # 3) Basic feature engineering (before ColumnTransformer)
-    #    - add Company_Age_Years, Has_Employees, Has_Revenue
+    #    - add Company_Age_Years
     #    - no leakage columns downstream
     df_train_eng = temporal_feature_engineer(df_train)
     df_val_eng   = temporal_feature_engineer(df_val)
