@@ -9,6 +9,7 @@ Implements the exact preprocessing strategy specified for membership prediction:
 - Feature engineering (Company_Age_Years, missing flags, PLZ grouping)
 """
 
+import logging
 import pandas as pd
 import numpy as np
 import scipy.sparse as sp
@@ -16,6 +17,8 @@ from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline, FunctionTransformer
 from sklearn.preprocessing import OneHotEncoder, PowerTransformer, FunctionTransformer
 from sklearn.impute import SimpleImputer
+
+log = logging.getLogger(__name__)
 
 # TargetEncoder: prefer sklearn (has internal cross-fitting); fallback to category_encoders
 try:
@@ -61,6 +64,9 @@ class FeatureEngineeringTransformer:
     
     def transform(self, X):
         """Apply all feature engineering steps."""
+        # Add this log
+        log.info(f"FeatureEngineering: Input shape {X.shape}")
+
         X_out = X.copy() if hasattr(X, 'copy') else pd.DataFrame(X, columns=self.feature_names_in_)
         
         # 1. Create missing indicators
@@ -89,6 +95,8 @@ class FeatureEngineeringTransformer:
                 # log(1+x) transform to handle zeros and skewness
                 X_out[f'{col}_log1p'] = np.log1p(X_out[col].fillna(0).clip(lower=0))
         
+        # Add this log
+        log.info(f"FeatureEngineering: Created {X_out.shape[1] - X.shape[1]} new features. Output shape {X_out.shape}")
         return X_out
     
     def fit_transform(self, X, y=None):
@@ -304,6 +312,8 @@ def to_float32(X):
     Lightweight transformer to convert output to float32.
     Essential for GPU memory efficiency.
     """
+    # Add this log (useful to know when we hit the final step before the model)
+    log.info(f"Converting to Float32. Matrix shape: {X.shape}")
     if sp.issparse(X):
         return X.astype(np.float32)
     return np.asarray(X, dtype=np.float32)
