@@ -11,6 +11,7 @@ Implements the exact preprocessing strategy specified for membership prediction:
 
 import pandas as pd
 import numpy as np
+import scipy.sparse as sp
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline, FunctionTransformer
 from sklearn.preprocessing import OneHotEncoder, PowerTransformer, FunctionTransformer
@@ -245,25 +246,29 @@ class CategoricalTypeConverter:
         return input_features
 
 # Low-cardinality categorical preprocessing with type conversion
-try:
-    # Handle sklearn version differences
-    low_card_pipeline = Pipeline([
-        ('type_converter', CategoricalTypeConverter()),
-        ('imputer', SimpleImputer(strategy='constant', fill_value='missing')),
-        ('onehot', OneHotEncoder(
-            handle_unknown='ignore',
-            sparse_output=False,        # sklearn >= 1.2
-            min_frequency=0.01,         # Group rare categories (1% threshold)
-            max_categories=20           # Cap categories per feature
-        ))
-    ])
-except TypeError:
-    # Fallback for older sklearn versions
-    low_card_pipeline = Pipeline([
-        ('type_converter', CategoricalTypeConverter()),
-        ('imputer', SimpleImputer(strategy='constant', fill_value='missing')),
-        ('onehot', OneHotEncoder(handle_unknown='ignore', sparse=False))
-    ])
+# Note: We configure the sparsity via the create_lead_gen_preprocessor arguments
+def create_low_card_pipeline(sparse_output=False):
+    try:
+        # Handle sklearn version differences
+        return Pipeline([
+            ('type_converter', CategoricalTypeConverter()),
+            ('imputer', SimpleImputer(strategy='constant', fill_value='missing')),
+            ('onehot', OneHotEncoder(
+                handle_unknown='ignore',
+                sparse_output=sparse_output,        # sklearn >= 1.2
+                min_frequency=0.01,         # Group rare categories (1% threshold)
+                max_categories=20           # Cap categories per feature
+            ))
+        ])
+    except TypeError:
+        # Fallback for older sklearn versions
+        return Pipeline([
+            ('type_converter', CategoricalTypeConverter()),
+            ('imputer', SimpleImputer(strategy='constant', fill_value='missing')),
+            ('onehot', OneHotEncoder(handle_unknown='ignore', sparse=sparse_output))
+        ])
+
+low_card_pipeline = create_low_card_pipeline(sparse_output=False) # Default
 
 # High-cardinality categorical preprocessing with type conversion
 if SKLEARN_TARGET_ENCODER:
@@ -294,7 +299,22 @@ high_card_pipeline = Pipeline([
 # Main ColumnTransformer 
 # =============================================================================
 
-def create_lead_gen_preprocessor():
+def to_float32(X):
+    """
+    Lightweight transformer to convert output to float32.
+    Essential for GPU memory efficiency.
+    """
+    if sp.issparse(X):
+        return X.astype(np.float32)
+    return np.asarray(X, dtype=np.float32)
+
+class ToFloat32Transformer(FunctionTransformer):
+    """Transformer wrapper for to_float32."""
+    def __init__(self):
+        super().__init__(func=to_float32, validate=False, check_inverse=False)
+
+
+def create_lead_gen_preprocessor(onehot_sparse=False):
     """
     Create the complete preprocessing pipeline for lead generation model.
     
@@ -305,6 +325,9 @@ def create_lead_gen_preprocessor():
     - High-card categoricals with Target Encoding (internal cross-fitting)
     - Feature engineering (Company_Age_Years, PLZ grouping, missing flags)
     
+    Args:
+        onehot_sparse: Whether to return sparse output from OneHotEncoder (useful for XGB/GPU)
+
     Returns:
         sklearn.compose.ColumnTransformer: Complete preprocessing pipeline
     """
@@ -312,16 +335,22 @@ def create_lead_gen_preprocessor():
     # Add feature engineering step with proper feature names support
     feature_engineering = FeatureEngineeringTransformer()
     
+    # Create low_card_pipeline with requested sparsity
+    current_low_card_pipeline = create_low_card_pipeline(sparse_output=onehot_sparse)
+
     # Main preprocessing
     preprocessor = ColumnTransformer(
         transformers=[
             ('numeric', numeric_pipeline, NUMERIC_COLS),
             ('ordinal', ordinal_pipeline, ORDINAL_COLS), 
-            ('low_card_cat', low_card_pipeline, LOW_CARD_CATEGORICAL_COLS),
+            ('low_card_cat', current_low_card_pipeline, LOW_CARD_CATEGORICAL_COLS),
             ('high_card_cat', high_card_pipeline, HIGH_CARD_CATEGORICAL_COLS)
         ],
         remainder='drop',  # Drop all other columns (including identifiers/leakage)
-        sparse_threshold=0.3,  # Allow sparse output if dominated by one-hot encoding
+        # If onehot_sparse is True, we likely want the whole CT to be sparse capable.
+        # However, ColumnTransformer sparse_threshold defaults to 0.3.
+        # If we heavily use sparse OHE, we might want to relax this or depend on the auto behavior.
+        sparse_threshold=0.3 if not onehot_sparse else 1.0,
         verbose_feature_names_out=False  # Cleaner feature names
     )
     
@@ -364,19 +393,20 @@ def example_usage():
 # Validation & Testing
 # =============================================================================
 
-def validate_preprocessor(df_sample, target_col='Target'):
+def validate_preprocessor(df_sample, target_col='Target', onehot_sparse=False):
     """
     Validate the preprocessor on a sample dataset.
     
     Args:
         df_sample: Sample dataframe with all expected columns
         target_col: Name of target column
+        onehot_sparse: Check sparse mode
         
     Returns:
         dict: Validation results and feature info
     """
     
-    preprocessor = create_lead_gen_preprocessor()
+    preprocessor = create_lead_gen_preprocessor(onehot_sparse=onehot_sparse)
     
     # Prepare data (remove leakage columns)
     feature_cols = [col for col in df_sample.columns if col not in DROP_COLS]

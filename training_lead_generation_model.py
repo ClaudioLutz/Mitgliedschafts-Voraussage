@@ -42,8 +42,15 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import HistGradientBoostingClassifier
 import inspect
 
+# XGBoost support
+try:
+    from xgboost import XGBClassifier
+    HAVE_XGBOOST = True
+except ImportError:
+    HAVE_XGBOOST = False
+
 # Import new Lead-Gen preprocessor
-from column_transformer_lead_gen import create_lead_gen_preprocessor, DROP_COLS, validate_preprocessor
+from column_transformer_lead_gen import create_lead_gen_preprocessor, DROP_COLS, validate_preprocessor, ToFloat32Transformer
 
 # Imbalance handling
 USE_CLASS_WEIGHT = Version(sklearn_version) >= Version("1.5")
@@ -53,6 +60,10 @@ try:
     HAVE_IMBLEARN = True
 except Exception:
     HAVE_IMBLEARN = False
+
+# Model Backend Configuration
+# Options: 'hgb' (default), 'xgb_gpu', 'xgb_cpu'
+MODEL_BACKEND = os.environ.get("MODEL_BACKEND", "hgb").lower()
 
 # Model persistence for checkpointing
 try:
@@ -73,13 +84,26 @@ USE_BEST_KNOWN_PARAMS = True   # Use proven best parameters (fastest)
 FORCE_NEW_SEARCH = False       # Override to always run hyperparameter search
 ENABLE_CHECKPOINTING = True    # Save/load search results to avoid re-work
 
-# Best hyperparameters from previous 3-hour search
-BEST_PARAMS = {
+# Best hyperparameters from previous 3-hour search (HGB)
+BEST_PARAMS_HGB = {
     "classifier__min_samples_leaf": 50,
     "classifier__max_leaf_nodes": 63,
     "classifier__max_iter": 300,
     "classifier__learning_rate": 0.06963974029624322,
     "classifier__l2_regularization": 0.5,
+}
+
+# Initial conservative best params for XGBoost (Placeholder)
+BEST_PARAMS_XGB = {
+    "classifier__max_depth": 6,
+    "classifier__learning_rate": 0.05,
+    "classifier__n_estimators": 600,
+    "classifier__subsample": 0.8,
+    "classifier__colsample_bytree": 0.8,
+    "classifier__min_child_weight": 1,
+    "classifier__reg_lambda": 1.0,
+    "classifier__reg_alpha": 0.0,
+    "classifier__gamma": 0.0
 }
 
 
@@ -368,6 +392,36 @@ def ensure_chronological_order(df: pd.DataFrame) -> pd.DataFrame:
 
     return df.sort_values(sort_cols).reset_index(drop=True)
 
+
+def get_xgb_classifier(backend, random_state=42, scale_pos_weight=1.0):
+    """
+    Factory to create XGBClassifier with appropriate parameters for GPU or CPU.
+    """
+    if not HAVE_XGBOOST:
+        raise RuntimeError("XGBoost is not installed. Please install 'xgboost'.")
+
+    # Common parameters
+    common_params = {
+        "n_estimators": 100, # default, will be tuned
+        "learning_rate": 0.1,
+        "max_depth": 6,
+        "objective": "binary:logistic",
+        "random_state": random_state,
+        "scale_pos_weight": scale_pos_weight,
+        "max_bin": 256,
+        "eval_metric": "logloss" # avoid warning
+    }
+
+    if backend == "xgb_gpu":
+        return XGBClassifier(
+            tree_method="gpu_hist",
+            **common_params
+        )
+    else: # xgb_cpu
+        return XGBClassifier(
+            tree_method="hist",
+            **common_params
+        )
 
 def stratified_sample_large_dataset(df: pd.DataFrame, target_col: str, max_samples: int, random_state: int = 42) -> pd.DataFrame:
     """
@@ -752,38 +806,70 @@ def main():
         log.warning(f"⚠️  Preprocessor validation failed: {e}")
 
     # 5) Create lead-gen specific preprocessor
-    pre = create_lead_gen_preprocessor()
-    log.info("🔧 Using Lead-Gen ColumnTransformer with engineered features")
 
-    # 6) Estimator & imbalance strategy
-    #    Choose ONE: class_weight if supported (sklearn >= 1.5), else SMOTE
-    if USE_CLASS_WEIGHT:
-        clf = HistGradientBoostingClassifier(
-            random_state=RANDOM_STATE,
-            early_stopping=False,
-            class_weight="balanced",
-            max_depth=None,
-            max_leaf_nodes=31,
-            min_samples_leaf=20,
-            l2_regularization=0.1
-        )
-        steps = [("preprocessor", pre), ("classifier", clf)]
-        PipelineClass = Pipeline  # standard sklearn pipeline
-        log.info("Imbalance via class_weight='balanced' (no SMOTE).")
+    # Determine configuration based on backend
+    if MODEL_BACKEND.startswith("xgb"):
+        # XGBoost path: Sparse output + Float32 + scale_pos_weight
+        log.info(f"🔧 Using {MODEL_BACKEND.upper()} backend.")
+
+        # Preprocessor: Sparse OHE, Float32 output preferred
+        pre = create_lead_gen_preprocessor(onehot_sparse=True)
+        log.info("🔧 Using Lead-Gen ColumnTransformer (Sparse Mode, Float32)")
+
+        # Calculate scale_pos_weight for imbalance
+        # We need to estimate it from the training data distribution roughly
+        # Or let the search find it? Usually scale_pos_weight ~ neg/pos
+        # We'll compute it exactly from the loaded data momentarily,
+        # but here we initialize the model. We can set it later or pass a placeholder.
+        # Since we haven't filtered to X_train_val yet, we can't compute exact ratio easily here.
+        # We will update it before fitting or search.
+
+        clf = get_xgb_classifier(MODEL_BACKEND, random_state=RANDOM_STATE, scale_pos_weight=1.0)
+
+        # Pipeline: Preprocess -> ToFloat32 -> Classifier
+        # No SMOTE for XGBoost
+        steps = [
+            ("preprocessor", pre),
+            ("to_float32", ToFloat32Transformer()),
+            ("classifier", clf)
+        ]
+        PipelineClass = Pipeline
+        log.info(f"Imbalance handling via XGBoost scale_pos_weight (no SMOTE).")
+
     else:
-        if not HAVE_IMBLEARN:
-            raise RuntimeError("imbalanced-learn not installed; install or upgrade scikit-learn to >=1.5 for class_weight.")
-        clf = HistGradientBoostingClassifier(
-            random_state=RANDOM_STATE,
-            early_stopping=False,
-            max_depth=None,
-            max_leaf_nodes=31,
-            min_samples_leaf=20,
-            l2_regularization=0.1
-        )
-        steps = [("preprocessor", pre), ("smote", SMOTE(random_state=RANDOM_STATE)), ("classifier", clf)]
-        PipelineClass = ImbPipeline  # imbalanced-learn pipeline
-        log.info("Imbalance via SMOTE (no class_weight).")
+        # HGB (Legacy) path
+        pre = create_lead_gen_preprocessor(onehot_sparse=False)
+        log.info("🔧 Using Lead-Gen ColumnTransformer with engineered features")
+
+        # 6) Estimator & imbalance strategy
+        #    Choose ONE: class_weight if supported (sklearn >= 1.5), else SMOTE
+        if USE_CLASS_WEIGHT:
+            clf = HistGradientBoostingClassifier(
+                random_state=RANDOM_STATE,
+                early_stopping=False,
+                class_weight="balanced",
+                max_depth=None,
+                max_leaf_nodes=31,
+                min_samples_leaf=20,
+                l2_regularization=0.1
+            )
+            steps = [("preprocessor", pre), ("classifier", clf)]
+            PipelineClass = Pipeline  # standard sklearn pipeline
+            log.info("Imbalance via class_weight='balanced' (no SMOTE).")
+        else:
+            if not HAVE_IMBLEARN:
+                raise RuntimeError("imbalanced-learn not installed; install or upgrade scikit-learn to >=1.5 for class_weight.")
+            clf = HistGradientBoostingClassifier(
+                random_state=RANDOM_STATE,
+                early_stopping=False,
+                max_depth=None,
+                max_leaf_nodes=31,
+                min_samples_leaf=20,
+                l2_regularization=0.1
+            )
+            steps = [("preprocessor", pre), ("smote", SMOTE(random_state=RANDOM_STATE)), ("classifier", clf)]
+            PipelineClass = ImbPipeline  # imbalanced-learn pipeline
+            log.info("Imbalance via SMOTE (no class_weight).")
 
     pipe = PipelineClass(steps=steps)
 
@@ -844,20 +930,39 @@ def main():
 
         sampled_data = combined_data # For consistency
 
+    # Update scale_pos_weight for XGBoost if used
+    if MODEL_BACKEND.startswith("xgb"):
+        n_pos = np.sum(y_train_val)
+        n_neg = len(y_train_val) - n_pos
+        ratio = n_neg / max(n_pos, 1)
+        log.info(f"Calculated scale_pos_weight: {ratio:.4f} (Neg={n_neg}, Pos={n_pos})")
+        # Update the parameter in the pipeline
+        pipe.set_params(classifier__scale_pos_weight=ratio)
+
     # Multi-tier approach: Known params > Checkpoint > Full search
     if USE_BEST_KNOWN_PARAMS and not FORCE_NEW_SEARCH:
         # TIER 1: Use proven best parameters (fastest path - ~30x faster)
         log.info("🚀 FAST PATH: Using known best parameters from previous 3-hour search")
-        log.info(f"Best params: {BEST_PARAMS}")
         
-        pipe.set_params(**BEST_PARAMS)
+        if MODEL_BACKEND.startswith("xgb"):
+            current_best_params = BEST_PARAMS_XGB
+            # Ensure scale_pos_weight is kept from dynamic calculation if not in BEST_PARAMS
+            if "classifier__scale_pos_weight" not in current_best_params:
+                current_best_params = current_best_params.copy()
+                current_best_params["classifier__scale_pos_weight"] = ratio
+        else:
+            current_best_params = BEST_PARAMS_HGB
+
+        log.info(f"Best params: {current_best_params}")
+
+        pipe.set_params(**current_best_params)
         fitted_pipeline = pipe.fit(X_train_val[feature_cols], y_train_val)
         
         # Create search result structure for compatibility with downstream code
         class BestParamsResult:
             def __init__(self):
                 self.best_estimator_ = fitted_pipeline
-                self.best_params_ = BEST_PARAMS
+                self.best_params_ = current_best_params
                 self.best_score_ = None  # Unknown, will be determined during calibration
         
         search = BestParamsResult()
@@ -885,13 +990,27 @@ def main():
         if FORCE_NEW_SEARCH:
             log.info("🔄 FORCE_NEW_SEARCH=True: Ignoring existing checkpoints")
         
-        param_distributions = {
-            "classifier__learning_rate": np.logspace(-2.3, -0.7, 8),  # ~0.005..0.2
-            "classifier__max_iter": [100, 200, 300],
-            "classifier__max_leaf_nodes": [15, 31, 63],
-            "classifier__min_samples_leaf": [10, 20, 50],
-            "classifier__l2_regularization": [0.0, 0.1, 0.5, 1.0],
-        }
+        if MODEL_BACKEND.startswith("xgb"):
+            # XGBoost Search Space
+            param_distributions = {
+                "classifier__max_depth": [3, 4, 6, 8],
+                "classifier__learning_rate": np.logspace(-2.0, -0.5, 6), # 0.01 .. 0.3
+                "classifier__n_estimators": [200, 400, 600, 800],
+                "classifier__min_child_weight": [1, 5, 10],
+                "classifier__subsample": [0.6, 0.8, 1.0],
+                "classifier__colsample_bytree": [0.6, 0.8, 1.0],
+                "classifier__reg_lambda": [0.1, 1.0, 5.0],
+                "classifier__gamma": [0.0, 0.1, 1.0],
+            }
+        else:
+            # HGB Search Space
+            param_distributions = {
+                "classifier__learning_rate": np.logspace(-2.3, -0.7, 8),  # ~0.005..0.2
+                "classifier__max_iter": [100, 200, 300],
+                "classifier__max_leaf_nodes": [15, 31, 63],
+                "classifier__min_samples_leaf": [10, 20, 50],
+                "classifier__l2_regularization": [0.0, 0.1, 0.5, 1.0],
+            }
 
         # Compute time-meaningful gap on TRAIN+VAL only (≈2 months)
         gap_samples = compute_ts_gap_samples(sampled_data, months_gap=2)
