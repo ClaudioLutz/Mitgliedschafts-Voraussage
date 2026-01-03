@@ -645,7 +645,8 @@ def get_xgb_classifier(backend, random_state=42, scale_pos_weight=1.0):
         common_params["max_bin"] = 64
         common_params["sampling_method"] = "gradient_based"
         return XGBClassifier(
-            tree_method="gpu_hist",
+            tree_method="hist",
+            device="cuda",
             **common_params
         )
     else: # xgb_cpu

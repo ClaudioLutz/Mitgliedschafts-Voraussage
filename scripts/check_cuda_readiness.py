@@ -10,9 +10,9 @@ def check_xgboost_gpu():
         X = np.random.rand(100, 10)
         y = np.random.randint(0, 2, 100)
 
-        # Try to train with GPU
-        print("Attempting to train with tree_method='gpu_hist'...")
-        clf = xgb.XGBClassifier(tree_method="gpu_hist", n_estimators=10)
+        # Try to train with GPU (XGBoost 3.x uses device='cuda' instead of tree_method='gpu_hist')
+        print("Attempting to train with device='cuda'...")
+        clf = xgb.XGBClassifier(tree_method="hist", device="cuda", n_estimators=10)
         clf.fit(X, y)
         print("SUCCESS: XGBoost trained with GPU support!")
         return True

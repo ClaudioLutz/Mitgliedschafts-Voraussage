@@ -194,6 +194,30 @@ pip install -r requirements-dev.txt
 pip install -r requirements-dnn.txt
 ```
 
+**GPU Support (Optional):**
+
+For CUDA-accelerated training with XGBoost or LightGBM:
+
+1. Ensure you have an NVIDIA GPU with CUDA support (CUDA 11.0+)
+2. Install GPU drivers and CUDA toolkit from NVIDIA
+3. Core packages from `requirements.txt` include GPU support automatically:
+   - XGBoost 3.x: GPU enabled via `device='cuda'` parameter
+   - LightGBM: CPU by default, GPU requires special build
+4. Verify GPU support:
+   ```bash
+   # Check NVIDIA GPU
+   nvidia-smi
+
+   # Verify XGBoost GPU
+   python scripts/check_cuda_readiness.py
+   ```
+
+For LightGBM GPU support:
+```bash
+pip uninstall lightgbm
+pip install lightgbm --config-settings=cmake.define.USE_CUDA=ON
+```
+
 ---
 
 ## Configuration
@@ -490,9 +514,11 @@ export MODEL_BACKEND=xgb_gpu
 python training_lead_generation_model.py
 ```
 
-- CUDA-accelerated training
-- Requires NVIDIA GPU with CUDA support
+- CUDA-accelerated training (uses `device='cuda'` with XGBoost 3.x)
+- Requires NVIDIA GPU with CUDA support (CUDA 11.0+)
+- Memory-optimized for 4GB+ VRAM (`max_bin=64`)
 - Verify GPU support: `python scripts/check_cuda_readiness.py`
+- **Note**: Requires XGBoost >= 3.0 for GPU support
 
 ### Deep Neural Network
 
@@ -540,7 +566,7 @@ The pipeline has undergone significant improvements to handle extreme class imba
 
 | Release | Key Improvements |
 |---------|------------------|
-| **Latest (Jan 2026)** | Temporal features, lookalike modeling (K-Prototypes + FAISS), two-stage pipeline architecture |
+| **Latest (Jan 2026)** | Temporal features, lookalike modeling (K-Prototypes + FAISS), two-stage pipeline architecture, XGBoost 3.x CUDA compatibility |
 | **Dec 2025** | BalancedBagging backend, LightGBM GPU/CPU support, Beta calibration, validation-based threshold optimization, NOGA hierarchy interaction features |
 | **Nov 2025** | Deep Neural Network backend support via TensorFlow/SciKeras |
 | **Oct 2025** | Forced hyperparameter search, comprehensive logging and monitoring |
@@ -608,6 +634,27 @@ docs/stories/YYYYMMddHHmmss-topic-of-change.md
 ```bash
 pip install shap
 ```
+
+---
+
+### GPU/CUDA Issues
+
+**Error:** `Invalid Input: 'gpu_hist', valid values are: {'approx', 'auto', 'exact', 'hist'}`
+
+**Solution:** This occurs with XGBoost 3.x which uses modern syntax. Ensure you have the latest code that uses `device='cuda'` instead of `tree_method='gpu_hist'`. Verify with:
+```bash
+python scripts/check_cuda_readiness.py
+```
+
+---
+
+**Error:** XGBoost GPU training fails or GPU not detected
+
+**Solution:**
+1. Verify CUDA installation: `nvidia-smi`
+2. Check XGBoost version: `python -c "import xgboost as xgb; print(xgb.__version__)"`
+3. Ensure XGBoost >= 3.0 for GPU support
+4. Reinstall if needed: `pip install --upgrade --force-reinstall xgboost`
 
 ---
 
