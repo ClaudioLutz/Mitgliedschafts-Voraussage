@@ -211,8 +211,8 @@ Configuration is managed through constants at the top of the main scripts. Key s
 
 Set via environment variable:
 ```bash
-# Options: hgb (default), hgb_bagging, lgbm_cpu, lgbm_gpu, xgb_cpu, xgb_gpu, dnn
-export MODEL_BACKEND=xgb_cpu
+# Options: hgb (default), hgb_bagging, lgbm_cpu, lgbm_gpu, xgb_cpu, xgb_gpu, dnn,xgb_cpu
+export MODEL_BACKEND=xgb_gpu
 ```
 
 ---

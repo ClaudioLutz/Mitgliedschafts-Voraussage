@@ -191,13 +191,20 @@ def log_transform_skewed(X):
 # Numeric features (keep as numeric, consider transforms if skewed)
 NUMERIC_COLS = [
     'MitarbeiterBestand',
-    'Umsatz', 
+    'Umsatz',
     'Risikoklasse',
     'Company_Age_Years',           # Engineered feature
+    'Company_Age_Log',             # Log-transformed age (temporal)
     'is_missing_MitarbeiterBestand',  # Missing indicator (engineered)
     'is_missing_Umsatz',              # Missing indicator (engineered)
     'MitarbeiterBestand_log1p',       # Log transform (engineered)
-    'Umsatz_log1p'                    # Log transform (engineered)
+    'Umsatz_log1p',                   # Log transform (engineered)
+    # Temporal features
+    'Month_Sin',                      # Cyclical month encoding (sin)
+    'Month_Cos',                      # Cyclical month encoding (cos)
+    'Is_End_Of_Quarter',              # End-of-quarter flag (peak B2B)
+    'Is_Summer',                      # Summer slowdown flag
+    'Quarter'                         # Quarter of year (1-4)
 ]
 
 # Ordinal features (use as integers) 
@@ -209,10 +216,11 @@ ORDINAL_COLS = [
 # Low-cardinality categoricals → One-Hot Encoding
 LOW_CARD_CATEGORICAL_COLS = [
     'Kanton',
-    'Rechtsform', 
+    'Rechtsform',
     'GroessenKategorie',
     'V_Bestand_Kategorie',
-    'RechtsCode'
+    'RechtsCode',
+    'Company_Age_Bucket'  # Age bucket (temporal feature)
 ]
 
 # High-cardinality categoricals → Target Encoding

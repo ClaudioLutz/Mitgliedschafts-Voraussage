@@ -24,6 +24,14 @@ psutil>=5.9.0
 # Visualization libraries
 matplotlib>=3.5.0
 seaborn>=0.11.0
+shap>=0.42.0
+
+# Lookalike feature engineering (optional but recommended)
+# K-Prototypes clustering for mixed categorical/numeric data
+kmodes>=0.12.2
+# FAISS for fast approximate nearest neighbor search
+# Use faiss-cpu for CPU-only systems, faiss-gpu for CUDA support
+faiss-cpu>=1.7.0
 
 # Optional: If you need specific versions for compatibility
 # You can uncomment and adjust these versions as needed
@@ -34,4 +42,3 @@ seaborn>=0.11.0
 # sqlalchemy==2.0.19
 # seaborn==0.12.2
 # joblib==1.3.2
-shap

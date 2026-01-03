@@ -104,7 +104,9 @@ def log_memory_usage(tag=""):
 warnings.filterwarnings("ignore")
 
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.ensemble import HistGradientBoostingClassifier, StackingClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
 import inspect
 
 # XGBoost support
@@ -131,6 +133,22 @@ except ImportError:
 # Import new Lead-Gen preprocessor
 from column_transformer_lead_gen import create_lead_gen_preprocessor, DROP_COLS, validate_preprocessor, ToFloat32Transformer
 
+# Import two-stage pipeline
+try:
+    from two_stage_pipeline import TwoStagePipeline, create_two_stage_pipeline
+    HAVE_TWO_STAGE = True
+except ImportError:
+    HAVE_TWO_STAGE = False
+
+# Import lookalike features (optional)
+try:
+    from lookalike_features import LookalikeFeatureTransformer, HAVE_KPROTOTYPES, HAVE_FAISS
+    HAVE_LOOKALIKE = True
+except ImportError:
+    HAVE_LOOKALIKE = False
+    HAVE_KPROTOTYPES = False
+    HAVE_FAISS = False
+
 # Imbalance handling
 USE_CLASS_WEIGHT = Version(sklearn_version) >= Version("1.5")
 try:
@@ -147,7 +165,8 @@ except Exception:
     HAVE_IMBLEARN_ENSEMBLE = False
 
 # Model Backend Configuration
-# Options: 'hgb' (default), 'hgb_bagging', 'xgb_gpu', 'xgb_cpu', 'lgbm_gpu', 'lgbm_cpu', 'dnn'
+# Options: 'hgb' (default), 'hgb_bagging', 'xgb_gpu', 'xgb_cpu', 'lgbm_gpu', 'lgbm_cpu', 'dnn',
+#          'stacking' (calibrated ensemble), 'two_stage' (filter-then-rank), 'lambdamart' (ranking)
 MODEL_BACKEND = os.environ.get("MODEL_BACKEND", "hgb").lower()
 
 # Model persistence for checkpointing
@@ -416,16 +435,63 @@ LEAKAGE_COLS = {
 
 @log_execution
 def temporal_feature_engineer(df: pd.DataFrame) -> pd.DataFrame:
-    """Add Company_Age_Years feature. Other feature engineering handled by Lead-Gen preprocessor."""
+    """
+    Add temporal features for lead generation model.
+
+    Features added:
+    - Company_Age_Years: Age of company at snapshot
+    - Company_Age_Log: Log-transformed age (handles outliers, captures diminishing effects)
+    - Company_Age_Bucket: Categorical age buckets (startup, early_growth, established, mature, legacy)
+    - Month_Sin, Month_Cos: Cyclical encoding of month (preserves continuity)
+    - Is_End_Of_Quarter: Flag for Q4 end months (3, 6, 9, 12) - peak B2B purchasing periods
+    - Is_Summer: Flag for Jul-Aug (slowdown period)
+    - Quarter: Quarter of the year (1-4)
+    """
     out = df.copy()
-    # Company age in years at snapshot (required by Lead-Gen ColumnTransformer)
-    if "Gruendung_Jahr" in out.columns:
+
+    # Company age in years at snapshot
+    if "Gruendung_Jahr" in out.columns and "snapshot_date" in out.columns:
         snap_year = out["snapshot_date"].dt.year
         out["Company_Age_Years"] = (
             snap_year - out["Gruendung_Jahr"].fillna(snap_year)
         ).clip(lower=0)
+
+        # Log-transformed age (handles outliers, captures diminishing lifecycle effects)
+        out["Company_Age_Log"] = np.log1p(out["Company_Age_Years"])
+
+        # Age buckets for interpretability
+        out["Company_Age_Bucket"] = pd.cut(
+            out["Company_Age_Years"],
+            bins=[-0.1, 2, 5, 10, 20, np.inf],
+            labels=['startup', 'early_growth', 'established', 'mature', 'legacy']
+        ).astype(str)
     else:
         out["Company_Age_Years"] = 0
+        out["Company_Age_Log"] = 0.0
+        out["Company_Age_Bucket"] = 'unknown'
+
+    # Seasonal B2B patterns from snapshot_date
+    if "snapshot_date" in out.columns:
+        month = out["snapshot_date"].dt.month
+
+        # Cyclical encoding for months (preserves continuity: Dec is close to Jan)
+        out["Month_Sin"] = np.sin(2 * np.pi * month / 12)
+        out["Month_Cos"] = np.cos(2 * np.pi * month / 12)
+
+        # End of quarter flag (Q4 and Q1 are peak B2B purchasing periods)
+        out["Is_End_Of_Quarter"] = month.isin([3, 6, 9, 12]).astype(int)
+
+        # Summer slowdown (Jul-Aug in Switzerland)
+        out["Is_Summer"] = month.isin([7, 8]).astype(int)
+
+        # Quarter of the year
+        out["Quarter"] = out["snapshot_date"].dt.quarter
+    else:
+        out["Month_Sin"] = 0.0
+        out["Month_Cos"] = 1.0
+        out["Is_End_Of_Quarter"] = 0
+        out["Is_Summer"] = 0
+        out["Quarter"] = 1
 
     return out
 
@@ -433,6 +499,7 @@ def temporal_feature_engineer(df: pd.DataFrame) -> pd.DataFrame:
 # Scorers & metrics
 # --------------------
 def precision_at_k(y_true: np.ndarray, y_score: np.ndarray, k: int) -> float:
+    """Compute precision at top-K predictions."""
     k = int(min(k, len(y_score)))
     if k <= 0:
         return 0.0
@@ -440,11 +507,50 @@ def precision_at_k(y_true: np.ndarray, y_score: np.ndarray, k: int) -> float:
     return float(np.mean(np.asarray(y_true)[order] == 1))
 
 
+def recall_at_k(y_true: np.ndarray, y_score: np.ndarray, k: int) -> float:
+    """Compute recall at top-K predictions (what fraction of positives are in top-K)."""
+    y_true = np.asarray(y_true)
+    k = int(min(k, len(y_score)))
+    if k <= 0:
+        return 0.0
+    n_positives = np.sum(y_true == 1)
+    if n_positives == 0:
+        return 0.0
+    order = np.argsort(-y_score)[:k]
+    return float(np.sum(y_true[order] == 1) / n_positives)
+
+
+def lift_at_k(y_true: np.ndarray, y_score: np.ndarray, k: int) -> float:
+    """Compute lift at top-K (precision@K / baseline rate)."""
+    y_true = np.asarray(y_true)
+    baseline = np.mean(y_true)
+    if baseline == 0:
+        return 0.0
+    p_at_k = precision_at_k(y_true, y_score, k)
+    return float(p_at_k / baseline)
+
+
 def precision_at_k_scorer_factory(k: int):
-    # scorer compatible with RandomizedSearchCV (signature: estimator, X, y)
+    """Create a scorer compatible with RandomizedSearchCV (signature: estimator, X, y)."""
     def _score(estimator, X, y):
         proba = estimator.predict_proba(X)[:, 1]
         return precision_at_k(np.asarray(y), proba, k)
+    return _score
+
+
+def recall_at_k_scorer_factory(k: int):
+    """Create a recall@K scorer for hyperparameter tuning."""
+    def _score(estimator, X, y):
+        proba = estimator.predict_proba(X)[:, 1]
+        return recall_at_k(np.asarray(y), proba, k)
+    return _score
+
+
+def lift_at_k_scorer_factory(k: int):
+    """Create a lift@K scorer for hyperparameter tuning."""
+    def _score(estimator, X, y):
+        proba = estimator.predict_proba(X)[:, 1]
+        return lift_at_k(np.asarray(y), proba, k)
     return _score
 
 
@@ -704,6 +810,181 @@ def get_lgbm_classifier(backend, random_state=42, scale_pos_weight=1.0):
         params["scale_pos_weight"] = scale_pos_weight
 
     return LGBMClassifier(**params)
+
+
+def get_stacking_ensemble(random_state=42, scale_pos_weight=1.0, cv=5):
+    """
+    Create a calibrated stacking ensemble combining multiple imbalance-handling strategies.
+
+    The ensemble combines:
+    1. Cost-sensitive HGB with class_weight='balanced'
+    2. Cost-sensitive XGBoost with scale_pos_weight
+    3. BalancedBagging with undersampling (different strategy = diversity)
+
+    Each base model is calibrated with isotonic regression before stacking.
+    The meta-learner is a class-weighted logistic regression.
+
+    Reference: Research shows combining resampling with cost-sensitive learning
+    consistently outperforms either approach alone.
+    """
+    log.info("Building calibrated stacking ensemble...")
+
+    # Base 1: Cost-sensitive HistGradientBoosting (with calibration)
+    hgb_base = make_hgb_classifier(
+        random_state=random_state,
+        class_weight="balanced" if hgb_supports_class_weight() else None,
+        max_iter=200,
+        learning_rate=0.07,
+        max_leaf_nodes=63,
+        min_samples_leaf=50,
+        l2_regularization=0.5,
+    )
+    hgb_calibrated = CalibratedClassifierCV(
+        estimator=hgb_base,
+        method='isotonic',
+        cv=cv
+    )
+
+    # Base 2: Cost-sensitive XGBoost (with calibration)
+    if HAVE_XGBOOST:
+        xgb_base = XGBClassifier(
+            n_estimators=200,
+            learning_rate=0.05,
+            max_depth=6,
+            scale_pos_weight=scale_pos_weight,
+            tree_method="hist",
+            eval_metric="logloss",
+            random_state=random_state
+        )
+        xgb_calibrated = CalibratedClassifierCV(
+            estimator=xgb_base,
+            method='isotonic',
+            cv=cv
+        )
+    else:
+        xgb_calibrated = None
+        log.warning("XGBoost not available, using only HGB and BalancedBagging in stack.")
+
+    # Base 3: BalancedBagging (different strategy = diversity)
+    # Uses undersampling per bag - complementary to cost-sensitive methods
+    if HAVE_IMBLEARN_ENSEMBLE:
+        # Use DecisionTree as base to maximize diversity (different from HGB/XGB)
+        dt_base = DecisionTreeClassifier(
+            max_depth=10,
+            min_samples_leaf=20,
+            random_state=random_state
+        )
+        bbc_base = make_balanced_bagging_classifier(
+            base_estimator=dt_base,
+            n_estimators=50,
+            sampling_strategy='auto',
+            random_state=random_state,
+            n_jobs=-1
+        )
+        bbc_calibrated = CalibratedClassifierCV(
+            estimator=bbc_base,
+            method='isotonic',
+            cv=cv
+        )
+    else:
+        bbc_calibrated = None
+        log.warning("imbalanced-learn not available, using only cost-sensitive methods in stack.")
+
+    # Build estimator list
+    estimators = [('hgb', hgb_calibrated)]
+    if xgb_calibrated is not None:
+        estimators.append(('xgb', xgb_calibrated))
+    if bbc_calibrated is not None:
+        estimators.append(('bbc', bbc_calibrated))
+
+    if len(estimators) < 2:
+        raise RuntimeError("Stacking requires at least 2 estimators. Install xgboost or imbalanced-learn.")
+
+    log.info(f"Stacking ensemble with {len(estimators)} calibrated base models: {[e[0] for e in estimators]}")
+
+    # Stack with class-weighted meta-learner
+    ensemble = StackingClassifier(
+        estimators=estimators,
+        final_estimator=LogisticRegression(
+            class_weight='balanced',
+            max_iter=1000,
+            random_state=random_state
+        ),
+        cv=cv,
+        stack_method='predict_proba',
+        passthrough=False,  # Use only base model predictions
+        n_jobs=1  # Avoid nested parallelism issues
+    )
+
+    return ensemble
+
+
+def get_lambdamart_ranker(random_state=42, truncation_level=55000):
+    """
+    Create a LightGBM LambdaMART ranker for learning-to-rank optimization.
+
+    LambdaMART optimizes ranking directly, which can be better than
+    classification when the goal is to rank the top-K leads.
+
+    Note: The ranker treats all samples as a single query group.
+    """
+    if not HAVE_LIGHTGBM:
+        raise RuntimeError("LightGBM is not installed. Required for LambdaMART.")
+
+    from lightgbm import LGBMRanker
+
+    ranker = LGBMRanker(
+        objective='lambdarank',
+        lambdarank_truncation_level=truncation_level,
+        n_estimators=500,
+        learning_rate=0.05,
+        num_leaves=63,
+        max_depth=7,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        random_state=random_state,
+        n_jobs=-1
+    )
+
+    return ranker
+
+
+class LambdaMARTWrapper:
+    """
+    Wrapper to make LGBMRanker compatible with sklearn classifier API.
+
+    Converts ranker scores to pseudo-probabilities for compatibility
+    with calibration and scoring functions.
+    """
+
+    def __init__(self, ranker):
+        self.ranker = ranker
+        self.classes_ = np.array([0, 1])
+        self._is_fitted = False
+
+    def fit(self, X, y):
+        # LGBMRanker requires group parameter
+        # Treat all samples as one query group
+        if hasattr(X, 'values'):
+            X = X.values
+        y = np.asarray(y)
+        group = [len(y)]  # Single group with all samples
+        self.ranker.fit(X, y, group=group)
+        self._is_fitted = True
+        return self
+
+    def predict_proba(self, X):
+        if hasattr(X, 'values'):
+            X = X.values
+        # Get raw ranker scores
+        scores = self.ranker.predict(X)
+        # Convert to pseudo-probabilities using sigmoid
+        probs = 1 / (1 + np.exp(-scores))
+        return np.column_stack([1 - probs, probs])
+
+    def predict(self, X):
+        proba = self.predict_proba(X)
+        return (proba[:, 1] >= 0.5).astype(int)
 
 
 def optimize_threshold_fbeta(y_true: np.ndarray, y_score: np.ndarray, beta: float = 2.0):
@@ -1312,6 +1593,63 @@ def main():
         steps = [("preprocessor", pre), ("classifier", clf)]
         PipelineClass = Pipeline
         log.info("Imbalance handling via BalancedBagging (undersampling).")
+
+    elif MODEL_BACKEND == "stacking":
+        # Calibrated stacking ensemble: combines HGB, XGB, BalancedBagging
+        log.info("Using STACKING (calibrated ensemble) backend.")
+        pre = create_lead_gen_preprocessor(onehot_sparse=False)
+        log.info("Using Lead-Gen ColumnTransformer (Dense Mode for Stacking)")
+
+        # scale_pos_weight will be set dynamically after sampling
+        clf = get_stacking_ensemble(
+            random_state=RANDOM_STATE,
+            scale_pos_weight=1.0,  # Updated later
+            cv=5
+        )
+
+        steps = [("preprocessor", pre), ("classifier", clf)]
+        PipelineClass = Pipeline
+        log.info("Imbalance handling via calibrated stacking (multiple strategies combined).")
+
+    elif MODEL_BACKEND == "lambdamart":
+        # LambdaMART ranking backend
+        log.info("Using LAMBDAMART (learning-to-rank) backend.")
+        pre = create_lead_gen_preprocessor(onehot_sparse=False)
+        log.info("Using Lead-Gen ColumnTransformer (Dense Mode for LambdaMART)")
+
+        ranker = get_lambdamart_ranker(
+            random_state=RANDOM_STATE,
+            truncation_level=max(LEAD_CAPACITY_K + 5000, 55000)
+        )
+        clf = LambdaMARTWrapper(ranker)
+
+        steps = [
+            ("preprocessor", pre),
+            ("to_float32", ToFloat32Transformer()),
+            ("classifier", clf)
+        ]
+        PipelineClass = Pipeline
+        log.info("Optimizing ranking directly via LambdaMART (no explicit imbalance handling).")
+
+    elif MODEL_BACKEND == "two_stage":
+        # Two-stage filter-then-rank pipeline
+        if not HAVE_TWO_STAGE:
+            raise RuntimeError("two_stage_pipeline module not available.")
+        log.info("Using TWO_STAGE (filter-then-rank) backend.")
+        pre = create_lead_gen_preprocessor(onehot_sparse=False)
+        log.info("Using Lead-Gen ColumnTransformer (Dense Mode for Two-Stage)")
+
+        # Create two-stage pipeline with logistic filter and HGB ranker
+        clf = create_two_stage_pipeline(
+            stage1_type='logistic',
+            stage2_type='hgb',
+            target_recall=0.95,
+            random_state=RANDOM_STATE
+        )
+
+        steps = [("preprocessor", pre), ("classifier", clf)]
+        PipelineClass = Pipeline
+        log.info("Using two-stage filter-then-rank with 95% recall Stage 1 filter.")
 
     else:
         # HGB (Legacy) path
