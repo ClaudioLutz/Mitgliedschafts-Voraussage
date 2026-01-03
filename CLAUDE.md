@@ -1,8 +1,30 @@
-# AGENTS.md
+# CLAUDE.md
 
 This repository is a lead-generation ML pipeline that predicts membership conversion for Swiss companies, trained on historical SQL Server snapshots and used to rank current non-members by probability of joining within a configurable horizon.
 
 This file is the operating manual for AI coding agents (and humans) working in this repo. Follow it unless the user explicitly overrides it.
+
+---
+
+## AI Agent Capabilities
+
+This repository is configured with MCP (Model Context Protocol) servers to extend AI agent capabilities:
+
+### Brave Search (MCP)
+
+* AI agents can perform **web searches** using Brave Search to:
+  * Look up current library documentation and API changes
+  * Research best practices for ML techniques
+  * Find solutions to dependency/compatibility issues
+  * Verify current versions of tools and frameworks
+* Configuration: [.mcp.json](.mcp.json)
+* Use this when you need up-to-date information beyond the agent's training cutoff
+
+**When to use web search:**
+* Investigating new library versions or breaking changes
+* Looking up error messages or compatibility issues
+* Researching ML techniques or hyperparameter tuning strategies
+* Finding documentation for external APIs or SQL Server features
 
 ---
 
@@ -51,7 +73,8 @@ This file is the operating manual for AI coding agents (and humans) working in t
 ### Core libraries (do not replace casually)
 
 * Data: `pandas`, `numpy`
-* ML: `scikit-learn`, `imbalanced-learn`, `category-encoders`
+* ML: `scikit-learn`, `imbalanced-learn`, `category-encoders`, `xgboost`, `lightgbm` (optional GPU-accelerated backends)
+* Deep Learning: `tensorflow`/`keras` (optional DNN backend)
 * DB: `sqlalchemy`, `pyodbc`
 * Serialization: `joblib`
 * Viz: `matplotlib`, `seaborn` (optional: `shap`)
