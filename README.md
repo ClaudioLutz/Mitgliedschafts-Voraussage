@@ -16,8 +16,14 @@ A production-grade machine learning pipeline that predicts membership conversion
 - [Configuration](#configuration)
 - [Usage](#usage)
 - [Project Structure](#project-structure)
+- [Advanced Features](#advanced-features)
+  - [Lookalike Modeling](#lookalike-modeling)
+  - [Two-Stage Pipeline](#two-stage-pipeline)
+  - [NOGA Hierarchy Features](#noga-hierarchy-features)
+  - [Advanced Calibration](#advanced-calibration)
 - [Model Backends](#model-backends)
 - [Testing](#testing)
+- [Recent Enhancements](#recent-enhancements)
 - [Documentation](#documentation)
 - [Troubleshooting](#troubleshooting)
 - [Contributing](#contributing)
@@ -35,6 +41,8 @@ This pipeline addresses the challenge of identifying high-potential leads from a
 - **Resource Optimization**: Focus outreach efforts on companies most likely to convert
 - **Data-Driven Decisions**: Replace intuition-based targeting with statistical evidence
 - **Calibrated Probabilities**: Output scores reflect true conversion likelihood
+- **Advanced Pattern Recognition**: Lookalike modeling identifies similar companies to past converters
+- **Handles Extreme Imbalance**: Specialized techniques for conversion rates as low as 0.11%
 
 ---
 
@@ -46,7 +54,11 @@ This pipeline addresses the challenge of identifying high-potential leads from a
 | **Leakage-Safe Design** | Strict separation of membership outcome fields from features |
 | **Centralized Preprocessing** | Single source of truth for feature engineering in `column_transformer_lead_gen.py` |
 | **Multiple Model Backends** | Support for HistGradientBoosting, BalancedBagging (HGB), LightGBM (CPU/GPU), XGBoost (CPU/GPU), and Deep Neural Networks |
-| **Probability Calibration** | Isotonic calibration ensures reliable probability estimates |
+| **Advanced Calibration** | Isotonic and optional Beta calibration for extreme imbalance scenarios |
+| **Validation-Based Thresholds** | Automatic threshold optimization on validation data with diagnostics |
+| **NOGA Hierarchy Features** | Automatically extracts section/division/group from industry codes and creates cross-features with cantons |
+| **Lookalike Modeling** | K-Prototypes clustering and FAISS-based similarity features for capturing non-linear patterns |
+| **Two-Stage Pipeline** | Optional filter-then-rank architecture for extreme class imbalance |
 | **Time-Series Cross-Validation** | Respects chronological order during hyperparameter tuning |
 | **Automated Checkpointing** | Saves search results to accelerate subsequent runs |
 | **Memory Optimization** | Stratified sampling for large datasets with distribution preservation |
@@ -70,9 +82,12 @@ This pipeline addresses the challenge of identifying high-potential leads from a
 │  column_transformer_lead_gen.py                                             │
 │  ├── Temporal Feature Engineering (Company_Age_Years)                       │
 │  ├── Missing Indicators & PLZ Grouping                                      │
+│  ├── NOGA Industry Hierarchy (Section, Division, Group, Kanton interactions)│
+│  ├── Log Transforms for Skewed Features                                     │
 │  ├── Numeric: Median Imputation + Power Transform                           │
 │  ├── Low-Cardinality: One-Hot Encoding (rare category grouping)             │
-│  └── High-Cardinality: Target Encoding (cross-fitted)                       │
+│  ├── High-Cardinality: Target Encoding (cross-fitted)                       │
+│  └── Optional Lookalike Features (K-Prototypes + FAISS KNN)                 │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
@@ -81,14 +96,17 @@ This pipeline addresses the challenge of identifying high-potential leads from a
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  Backend Options:                                                           │
 │  ├── HGB: HistGradientBoostingClassifier (default)                         │
+│  ├── HGB_Bagging: BalancedBagging with HGB (extreme imbalance)             │
+│  ├── LGBM: LightGBM (CPU or GPU accelerated)                               │
 │  ├── XGB: XGBoost (CPU or GPU accelerated)                                 │
 │  └── DNN: Deep Neural Network (TensorFlow/SciKeras)                        │
 │                                                                             │
 │  Training Pipeline:                                                         │
 │  ├── Time-Series Cross-Validation (chronological splits)                   │
-│  ├── Randomized Hyperparameter Search                                      │
-│  ├── Class Imbalance Handling (class_weight or SMOTE)                      │
-│  └── Isotonic Probability Calibration                                      │
+│  ├── Randomized Hyperparameter Search with checkpointing                   │
+│  ├── Class Imbalance Handling (class_weight, BalancedBagging, or SMOTE)    │
+│  ├── Advanced Calibration (Isotonic or Beta)                               │
+│  └── Validation-Based Threshold Optimization                               │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
@@ -102,7 +120,8 @@ This pipeline addresses the challenge of identifying high-potential leads from a
 │  artifacts/                                                                 │
 │  ├── calibrated_model.joblib           (Production-ready model)            │
 │  ├── best_pipeline.joblib              (Best hyperparameters)              │
-│  └── search_metadata.joblib            (Search history & versioning)       │
+│  ├── search_metadata.joblib            (Search history & versioning)       │
+│  └── thresholds.json                   (Threshold & calibration diagnostics)│
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -211,9 +230,17 @@ Configuration is managed through constants at the top of the main scripts. Key s
 
 Set via environment variable:
 ```bash
-# Options: hgb (default), hgb_bagging, lgbm_cpu, lgbm_gpu, xgb_cpu, xgb_gpu, dnn,xgb_cpu
+# Options: hgb (default), hgb_bagging, lgbm_cpu, lgbm_gpu, xgb_cpu, xgb_gpu, dnn
 export MODEL_BACKEND=xgb_gpu
 ```
+
+### Advanced Features
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `USE_LOOKALIKE_FEATURES` | `False` | Enable K-Prototypes + FAISS similarity features |
+| `USE_TWO_STAGE_PIPELINE` | `False` | Enable filter-then-rank architecture |
+| `USE_BETA_CALIBRATION` | `False` | Use Beta calibration instead of Isotonic |
 
 ---
 
@@ -231,7 +258,8 @@ python training_lead_generation_model.py
 - `outputs/gains_table_test.csv` — Model performance metrics
 - `artifacts/calibrated_model.joblib` — Serialized production model
 - `artifacts/best_params.joblib` — Optimal hyperparameters
-- `artifacts/thresholds.json` Thresholds and calibration diagnostics
+- `artifacts/thresholds.json` — Thresholds and calibration diagnostics
+- `training_run_YYYYMMDD_HHMM.log` — Detailed training log
 - SQL table `mitgliederstatistik.lead_generation_rankings` — Database export
 
 ### Estimating Runtime
@@ -280,6 +308,8 @@ mitgliedschafts-voraussage/
 │
 ├── training_lead_generation_model.py   # Main training pipeline
 ├── column_transformer_lead_gen.py      # Preprocessing & feature engineering
+├── lookalike_features.py               # K-Prototypes + FAISS similarity features
+├── two_stage_pipeline.py               # Filter-then-rank architecture
 ├── time_estimation.py                  # Runtime estimation utility
 ├── run_visualizations.py               # Visualization runner
 ├── visualize_lead_model.py             # Plotting functions
@@ -297,6 +327,7 @@ mitgliedschafts-voraussage/
 │   ├── test_pipeline_smoke.py          # Core pipeline tests
 │   ├── test_xgb_pipeline.py            # XGBoost backend tests
 │   ├── test_dnn_pipeline.py            # DNN backend tests
+│   ├── test_new_features.py            # Lookalike/two-stage tests
 │   └── verify_preprocessor_updates.py  # Preprocessor validation
 │
 ├── docs/
@@ -308,6 +339,8 @@ mitgliedschafts-voraussage/
 │   ├── future_plans.md
 │   └── stories/                        # Change documentation
 │
+├── deprecated/                         # Legacy code (archived)
+│
 ├── outputs/                            # Generated results (gitignored)
 ├── artifacts/                          # Model artifacts (gitignored)
 ├── figures/                            # Visualization outputs (gitignored)
@@ -318,6 +351,82 @@ mitgliedschafts-voraussage/
 ├── pytest.ini                          # Test configuration
 └── AGENTS.md                           # AI agent guidelines
 ```
+
+---
+
+## Advanced Features
+
+### Lookalike Modeling
+
+The pipeline supports advanced similarity-based features to capture non-linear patterns:
+
+**K-Prototypes Clustering** ([lookalike_features.py](lookalike_features.py)):
+- Clusters companies using mixed categorical/numeric data
+- Computes historical conversion rates per cluster with Bayesian smoothing
+- Adds `cluster_conversion_rate` and `cluster_id` features
+
+**FAISS KNN Similarity** ([lookalike_features.py](lookalike_features.py)):
+- Fast approximate nearest neighbor search using FAISS
+- Computes distance-based features to known converters
+- Adds `mean_dist_converters`, `min_dist_converter`, `max_dist_converter`, `std_dist_converters`
+
+**Installation:**
+```bash
+pip install kmodes faiss-cpu  # or faiss-gpu for GPU support
+```
+
+**Usage:**
+Set `USE_LOOKALIKE_FEATURES=True` in [training_lead_generation_model.py](training_lead_generation_model.py) or configure via environment.
+
+### Two-Stage Pipeline
+
+For extreme class imbalance scenarios, the two-stage architecture improves performance:
+
+**Stage 1 - Filter**: High-recall model (e.g., Logistic Regression) filters out obvious non-converters
+- Uses out-of-fold predictions to prevent data leakage
+- Targets 95% recall by default
+- Reduces candidate pool to ~15-20% of data
+
+**Stage 2 - Rank**: Precision-focused model (e.g., HGB) trains on filtered candidates
+- Better class balance (~1-2% vs 0.11%)
+- Can use expensive computed features
+- Optional isotonic calibration
+
+**Usage:**
+Set `USE_TWO_STAGE_PIPELINE=True` in [training_lead_generation_model.py](training_lead_generation_model.py).
+
+See [two_stage_pipeline.py](two_stage_pipeline.py) for implementation details.
+
+### NOGA Hierarchy Features
+
+Automatically extracts hierarchical industry classification features:
+
+- **NOGA_section**: Single-digit section code (e.g., "C" for Manufacturing)
+- **NOGA_division**: Two-digit division code
+- **NOGA_group**: Three-digit group code
+- **Kanton_NOGA_section**: Cross-feature combining canton and industry section
+
+These features capture industry patterns at multiple granularities and regional industry interactions.
+
+Implemented in [column_transformer_lead_gen.py](column_transformer_lead_gen.py:95-118).
+
+### Advanced Calibration
+
+**Beta Calibration**: For extreme imbalance scenarios where isotonic calibration may be unstable
+- Fits a Beta distribution to calibrate probabilities
+- More robust than isotonic for sparse positive classes
+- Requires `betacal` package
+
+**Usage:**
+```bash
+pip install betacal
+```
+Set `USE_BETA_CALIBRATION=True` in configuration.
+
+**Validation-Based Thresholds**: Automatically optimizes classification threshold on validation data
+- Computes optimal threshold for precision/recall trade-offs
+- Saves diagnostics to `artifacts/thresholds.json`
+- Reports include: threshold, precision, recall, F1, and calibration metrics
 
 ---
 
@@ -422,6 +531,22 @@ Test DNN backend (requires DNN dependencies):
 pip install -r requirements-dnn.txt
 MODEL_BACKEND=dnn pytest tests/test_dnn_pipeline.py
 ```
+
+---
+
+## Recent Enhancements
+
+The pipeline has undergone significant improvements to handle extreme class imbalance:
+
+| Release | Key Improvements |
+|---------|------------------|
+| **Latest (Jan 2026)** | Temporal features, lookalike modeling (K-Prototypes + FAISS), two-stage pipeline architecture |
+| **Dec 2025** | BalancedBagging backend, LightGBM GPU/CPU support, Beta calibration, validation-based threshold optimization, NOGA hierarchy interaction features |
+| **Nov 2025** | Deep Neural Network backend support via TensorFlow/SciKeras |
+| **Oct 2025** | Forced hyperparameter search, comprehensive logging and monitoring |
+| **Sep 2025** | XGBoost GPU acceleration support |
+
+See [docs/stories/](docs/stories/) for detailed change documentation.
 
 ---
 
