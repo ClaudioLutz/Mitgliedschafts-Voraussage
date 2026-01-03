@@ -14,7 +14,10 @@ import math
 import json
 import logging
 import warnings
+import argparse
+import pickle
 from datetime import datetime, timedelta
+from pathlib import Path
 import psutil
 
 import numpy as np
@@ -165,7 +168,8 @@ except Exception:
     HAVE_IMBLEARN_ENSEMBLE = False
 
 # Model Backend Configuration
-# Options: 'hgb' (default), 'hgb_bagging', 'xgb_gpu', 'xgb_cpu', 'lgbm_gpu', 'lgbm_cpu', 'dnn',
+# Options: 'hgb' (default), 'hgb_bagging', 'xgb_gpu', 'xgb_cpu', 'lgbm_gpu', 'lgbm_cpu',
+#          'dnn_gpu', 'dnn_cpu', 'dnn' (legacy, defaults to CPU),
 #          'stacking' (calibrated ensemble), 'two_stage' (filter-then-rank), 'lambdamart' (ranking)
 MODEL_BACKEND = os.environ.get("MODEL_BACKEND", "hgb").lower()
 
@@ -270,8 +274,8 @@ N_JOBS_SEARCH = 1  # avoid worker crashes on huge folds (increase if RAM allows)
 
 # Memory optimization settings
 SAMPLE_TRAINING_DATA = True  # Use stratified sampling for large datasets
-MAX_TRAINING_SAMPLES = 2500000  # Maximum samples for training (increased for better stratification)
-USE_BUSINESS_LOGIC_SAMPLING = True  # Use advanced business-logic sampling
+MAX_TRAINING_SAMPLES = 500000  # Maximum samples for training (reduced to prevent OOM)
+USE_BUSINESS_LOGIC_SAMPLING = False  # Disabled to reduce memory usage (prevents OOM)
 PRESERVE_RARE_POSITIVES = True  # Preserve rare but valuable positive cases
 
 
@@ -366,6 +370,34 @@ SELECT * FROM modeling;
     log.info("Loading modeling snapshots (labels complete) from DB...")
     df = pd.read_sql_query(text(query), engine, parse_dates=["snapshot_date", "Eintritt", "Austritt"])
     return df
+
+
+@log_execution
+def load_cached_data(cache_file: str = "cache/training_data.pkl") -> pd.DataFrame:
+    """
+    Load training data from cached pickle file (for offline/WSL training).
+    
+    Args:
+        cache_file: Path to cached pickle file
+        
+    Returns:
+        DataFrame with modeling data
+    """
+    cache_path = Path(cache_file)
+    if not cache_path.exists():
+        raise FileNotFoundError(f"Cache file not found: {cache_path}. Run scripts/export_training_data.py first.")
+    
+    log.info(f"Loading cached data from: {cache_path}")
+    with open(cache_path, 'rb') as f:
+        cache_data = pickle.load(f)
+    
+    df_model = cache_data["df_model"]
+    horizon_months = cache_data.get("horizon_months", HORIZON_MONTHS)
+    
+    log.info(f"Loaded cached data: {len(df_model):,} records (horizon={horizon_months} months)")
+    log.info(f"Cache metadata: server={cache_data.get('server')}, database={cache_data.get('database')}")
+    
+    return df_model
 
 
 @log_execution
@@ -667,6 +699,7 @@ def get_dnn_classifier(
     validation_split=None,
     random_state=None,
     verbose=None,
+    use_gpu=False,
 ):
     """Factory to create a SciKeras-compatible DNN classifier."""
     try:
@@ -709,6 +742,7 @@ def get_dnn_classifier(
         validation_split=validation_split,
         random_state=random_state,
         verbose=verbose,
+        use_gpu=use_gpu,
     )
 
 
@@ -1465,21 +1499,27 @@ def checkpoint_exists():
 # --------------------
 # Main
 # --------------------
-def main():
+def main(use_cache=False, cache_file="cache/training_data.pkl"):
     log_memory_usage("Start")
     log.info("=== Starting Lead Generation Model Training (refactored) ===")
-    engine = make_engine(SERVER, DATABASE)
-    log.info("DB connection OK")
+    
+    # 1) Load modeling data: from cache or database
+    if use_cache:
+        log.info(f"🗂️  Using cached data mode (offline training)")
+        df_model = load_cached_data(cache_file)
+        df_current = None  # Skip current snapshot loading in cache mode
+        engine = None  # No database connection in cache mode
+    else:
+        engine = make_engine(SERVER, DATABASE)
+        log.info("DB connection OK")
+        df_model = load_modeling_data(engine, horizon_months=HORIZON_MONTHS)
+        df_current = load_current_snapshot(engine)
+        latest_snapshot = df_current["snapshot_date"].max()
+        log.info(f"Current prospects loaded for snapshot: {latest_snapshot}")
 
-    # 1) Load modeling (complete labels) + current prospects (latest snapshot)
-    df_model = load_modeling_data(engine, horizon_months=HORIZON_MONTHS)
     log.info(f"Modeling rows: {len(df_model):,}, snapshots: {df_model['snapshot_date'].nunique()} "
              f"from {df_model['snapshot_date'].min()} to {df_model['snapshot_date'].max()}")
     log.info(f"Overall conversion rate (modeling): {df_model['Target'].mean():.4f}")
-
-    df_current = load_current_snapshot(engine)
-    latest_snapshot = df_current["snapshot_date"].max()
-    log.info(f"Current prospects loaded for snapshot: {latest_snapshot}")
     log_memory_usage("After Data Load")
 
     # 2) Split modeling data by unique dates
@@ -1497,7 +1537,7 @@ def main():
     df_train_eng = temporal_feature_engineer(df_train)
     df_val_eng   = temporal_feature_engineer(df_val)
     df_test_eng  = temporal_feature_engineer(df_test)
-    df_curr_eng  = temporal_feature_engineer(df_current)
+    df_curr_eng  = temporal_feature_engineer(df_current) if df_current is not None else None
     log_memory_usage("After Feature Engineering")
 
     # 4) Optional: Validate preprocessor on sample data
@@ -1552,12 +1592,14 @@ def main():
         else:
             log.info("Imbalance handling via LightGBM scale_pos_weight.")
 
-    elif MODEL_BACKEND == "dnn":
-        log.info("Using DNN backend.")
+    elif MODEL_BACKEND in ("dnn", "dnn_gpu", "dnn_cpu"):
+        use_gpu = MODEL_BACKEND == "dnn_gpu"
+        backend_name = "DNN (GPU)" if use_gpu else "DNN (CPU)"
+        log.info(f"Using {backend_name} backend.")
         pre = create_lead_gen_preprocessor(onehot_sparse=False)
         log.info("Using Lead-Gen ColumnTransformer (Dense Mode, Float32) for DNN")
 
-        clf = get_dnn_classifier()
+        clf = get_dnn_classifier(use_gpu=use_gpu)
 
         steps = [
             ("preprocessor", pre),
@@ -1764,7 +1806,7 @@ def main():
         elif MODEL_BACKEND.startswith("lgbm") and not LGBM_USE_UNBALANCE:
             pipe.set_params(classifier__scale_pos_weight=ratio)
 
-    if MODEL_BACKEND == "dnn":
+    if MODEL_BACKEND in ("dnn", "dnn_gpu", "dnn_cpu"):
         classes = np.unique(y_train_val)
         if len(classes) == 2:
             weights = compute_class_weight(class_weight="balanced", classes=classes, y=y_train_val)
@@ -1791,7 +1833,7 @@ def main():
                 if "classifier__scale_pos_weight" not in current_best_params:
                     current_best_params = current_best_params.copy()
                     current_best_params["classifier__scale_pos_weight"] = ratio
-        elif MODEL_BACKEND == "dnn":
+        elif MODEL_BACKEND in ("dnn", "dnn_gpu", "dnn_cpu"):
             current_best_params = BEST_PARAMS_DNN
         elif MODEL_BACKEND == "hgb_bagging":
             current_best_params = BEST_PARAMS_HGB_BAGGING
@@ -1869,7 +1911,7 @@ def main():
                 f"classifier__{estimator_param}__min_samples_leaf": [20, 50],
                 f"classifier__{estimator_param}__l2_regularization": [0.1, 0.5, 1.0],
             }
-        elif MODEL_BACKEND == "dnn":
+        elif MODEL_BACKEND in ("dnn", "dnn_gpu", "dnn_cpu"):
             # DNN Search Space (keep small; early stopping controls training time)
             param_distributions = {
                 "classifier__model__hidden_units": [(128, 64), (256, 128), (256, 128, 64)],
@@ -2057,26 +2099,30 @@ def main():
     log.info("Saved gains_table_test.csv")
 
     # 11) Score CURRENT prospects (latest snapshot)
-    X_curr = df_curr_eng[feature_cols]
-    p_curr = calibrated.predict_proba(X_curr)[:, 1]
-    scored = df_current[["CrefoID", "Name_Firma", "snapshot_date"]].copy()
-    scored["p_convert"] = p_curr
+    if df_current is not None and df_curr_eng is not None:
+        X_curr = df_curr_eng[feature_cols]
+        p_curr = calibrated.predict_proba(X_curr)[:, 1]
+        scored = df_current[["CrefoID", "Name_Firma", "snapshot_date"]].copy()
+        scored["p_convert"] = p_curr
 
-    # Rank & deciles for sales
-    scored = scored.sort_values("p_convert", ascending=False).reset_index(drop=True)
-    scored["rank"] = np.arange(1, len(scored) + 1)
-    scored["decile"] = pd.qcut(scored["rank"], q=10, labels=False) + 1
+        # Rank & deciles for sales
+        scored = scored.sort_values("p_convert", ascending=False).reset_index(drop=True)
+        scored["rank"] = np.arange(1, len(scored) + 1)
+        scored["decile"] = pd.qcut(scored["rank"], q=10, labels=False) + 1
 
-    # Export CSV
-    ts_tag = datetime.now().strftime("%Y%m%d_%H%M")
-    out_csv = os.path.join(OUTDIR, f"ranked_leads_{ts_tag}.csv")
-    scored.to_csv(out_csv, index=False)
-    log.info(f"Saved ranked leads to {out_csv}")
+        # Export CSV
+        ts_tag = datetime.now().strftime("%Y%m%d_%H%M")
+        out_csv = os.path.join(OUTDIR, f"ranked_leads_{ts_tag}.csv")
+        scored.to_csv(out_csv, index=False)
+        log.info(f"Saved ranked leads to {out_csv}")
 
-    #12) (Optional) Write to SQL table for BI/CRM pickup
-    scored.to_sql("lead_generation_rankings", con=engine, schema=SCHEMA,
-                  if_exists="replace", index=False)
-    log.info("Exported ranked leads to SQL (mitgliederstatistik.lead_generation_rankings)")
+        #12) (Optional) Write to SQL table for BI/CRM pickup
+        if engine is not None:
+            scored.to_sql("lead_generation_rankings", con=engine, schema=SCHEMA,
+                          if_exists="replace", index=False)
+            log.info("Exported ranked leads to SQL (mitgliederstatistik.lead_generation_rankings)")
+    else:
+        log.info("⚠️  Skipping current prospect scoring (cache mode - no current snapshot loaded)")
 
     log.info("=== Done ===")
 

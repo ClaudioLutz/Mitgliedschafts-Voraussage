@@ -53,12 +53,14 @@ def build_model(
         if dropout and dropout > 0:
             x = tf.keras.layers.Dropout(dropout)(x)
 
-    outputs = tf.keras.layers.Dense(1, activation="sigmoid")(x)
+    # Use 2 output neurons with softmax for explicit binary classification
+    # This ensures sklearn properly detects this as a classifier
+    outputs = tf.keras.layers.Dense(2, activation="softmax")(x)
     model = tf.keras.Model(inputs=inputs, outputs=outputs)
     optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
     model.compile(
         optimizer=optimizer,
-        loss="binary_crossentropy",
+        loss="sparse_categorical_crossentropy",  # Changed from binary_crossentropy
         metrics=[tf.keras.metrics.AUC(curve="PR", name="pr_auc")],
     )
     return model
@@ -75,8 +77,27 @@ def make_dnn_estimator(
     validation_split: float = 0.1,
     random_state: int = 42,
     verbose: int = 0,
+    use_gpu: bool = False,
 ):
     tf, KerasClassifier = _require_dnn_dependencies()
+
+    # Configure GPU/CPU usage
+    if use_gpu:
+        gpus = tf.config.list_physical_devices('GPU')
+        if gpus:
+            try:
+                # Enable memory growth to avoid allocating all GPU memory at once
+                for gpu in gpus:
+                    tf.config.experimental.set_memory_growth(gpu, True)
+                log.info(f"TensorFlow DNN backend: Using GPU acceleration ({len(gpus)} GPU(s) detected)")
+            except RuntimeError as e:
+                log.warning(f"Failed to configure GPU memory growth: {e}. Falling back to CPU.")
+        else:
+            log.warning("GPU requested but no GPUs detected. Falling back to CPU.")
+    else:
+        # Force CPU-only execution
+        tf.config.set_visible_devices([], 'GPU')
+        log.info("TensorFlow DNN backend: Using CPU (GPU disabled)")
 
     callbacks = []
     if patience and patience > 0:

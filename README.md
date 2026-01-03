@@ -520,17 +520,100 @@ python training_lead_generation_model.py
 - Verify GPU support: `python scripts/check_cuda_readiness.py`
 - **Note**: Requires XGBoost >= 3.0 for GPU support
 
-### Deep Neural Network
+### Deep Neural Network (CPU)
 
 ```bash
 pip install -r requirements-dnn.txt
-export MODEL_BACKEND=dnn
+export MODEL_BACKEND=dnn_cpu
 python training_lead_generation_model.py
 ```
 
 - TensorFlow/Keras backend via SciKeras
 - Early stopping with validation monitoring
 - Configurable architecture (hidden units, dropout, L2 regularization)
+
+### Deep Neural Network (GPU - WSL2)
+
+**Important**: TensorFlow GPU support on Windows requires WSL2 (TensorFlow 2.11+ dropped native Windows GPU support).
+
+#### Prerequisites
+1. **WSL2 installed** with Ubuntu 22.04
+2. **NVIDIA GPU** with drivers installed on Windows
+3. **CUDA support** in WSL2 (GPU automatically available to WSL)
+
+#### Quick Setup
+
+**Step 1: Export training data (run on Windows)**
+```bash
+python scripts/export_training_data.py
+```
+This creates `cache/training_data.pkl` (~2.3 GB) for offline training in WSL.
+
+**Step 2: Set up WSL environment**
+```bash
+# Run the automated setup script
+wsl bash scripts/setup_wsl_gpu.sh
+```
+
+Or manually:
+```bash
+wsl
+
+# Navigate to project
+cd "/mnt/c/Lokal_Code/Mitgliedschafts Voraussage/Mitgliedschafts Voraussage"
+
+# Create WSL virtual environment
+python3 -m venv venv_wsl
+source venv_wsl/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+pip install tensorflow[and-cuda]
+pip install scikeras cloudpickle
+```
+
+**Step 3: Verify GPU detection**
+```bash
+wsl bash -c "cd '/mnt/c/Lokal_Code/Mitgliedschafts Voraussage/Mitgliedschafts Voraussage' && source venv_wsl/bin/activate && python3 scripts/check_tensorflow_gpu.py"
+```
+
+**Step 4: Run GPU training**
+```bash
+# Option 1: One-line command
+wsl bash -c "cd '/mnt/c/Lokal_Code/Mitgliedschafts Voraussage/Mitgliedschafts Voraussage' && source venv_wsl/bin/activate && MODEL_BACKEND=dnn_gpu python3 -c 'from training_lead_generation_model import main; main(use_cache=True)'"
+
+# Option 2: Interactive WSL session
+wsl
+cd "/mnt/c/Lokal_Code/Mitgliedschafts Voraussage/Mitgliedschafts Voraussage"
+source venv_wsl/bin/activate
+MODEL_BACKEND=dnn_gpu python3 -c "from training_lead_generation_model import main; main(use_cache=True)"
+```
+
+#### Performance
+- **GPU Acceleration**: 2-10x faster than CPU training
+- **Cached Data**: No database connection required in WSL
+- **Memory Efficient**: Stratified sampling to 2.5M samples
+
+#### Files Created
+- `scripts/setup_wsl_gpu.sh` - Automated WSL setup script
+- `scripts/export_training_data.py` - Data export utility
+- `cache/training_data.pkl` - Cached training data (~2.3 GB)
+- `venv_wsl/` - WSL-specific Python environment
+
+#### Troubleshooting
+
+**No GPU detected in WSL:**
+- Ensure NVIDIA drivers are up to date on Windows
+- Verify GPU is visible: `wsl nvidia-smi`
+- Check WSL2 (not WSL1): `wsl --list --verbose`
+
+**Import errors:**
+- Activate correct environment: `source venv_wsl/bin/activate`
+- Reinstall if needed: `pip install tensorflow[and-cuda] scikeras`
+
+**Cache file not found:**
+- Run export script first: `python scripts/export_training_data.py`
+- Verify file exists: `ls -lh cache/training_data.pkl`
 
 ---
 
