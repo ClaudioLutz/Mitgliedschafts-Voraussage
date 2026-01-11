@@ -14,7 +14,6 @@ Reference: This architecture is standard in ad-tech (Twitter, Meta)
 where rankers train on retrieved candidates.
 """
 
-import logging
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, ClassifierMixin, clone
@@ -24,7 +23,9 @@ from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassif
 from sklearn.linear_model import LogisticRegression
 from sklearn.calibration import CalibratedClassifierCV
 
-log = logging.getLogger(__name__)
+# --- Centralized logging
+from log_utils import get_logger
+log = get_logger(__name__)
 
 
 def find_recall_threshold(y_true, y_score, target_recall=0.95):
@@ -238,7 +239,22 @@ class TwoStagePipeline(BaseEstimator, ClassifierMixin):
         # For samples passing Stage 1, use Stage 2 probabilities
         if np.any(pass_stage1):
             X_pass = X[pass_stage1] if hasattr(X, '__getitem__') else X.iloc[pass_stage1]
-            stage2_proba = self.stage2_.predict_proba(X_pass)[:, 1]
+            stage2_pred = self.stage2_.predict_proba(X_pass)
+            # Handle edge case: if Stage 2 was trained on single-class data,
+            # predict_proba may return only 1 column
+            if stage2_pred.shape[1] == 1:
+                # Single class - check which class the model knows
+                if hasattr(self.stage2_, 'classes_'):
+                    known_class = self.stage2_.classes_[0]
+                    if known_class == 1:
+                        stage2_proba = stage2_pred[:, 0]  # All positive
+                    else:
+                        stage2_proba = 1 - stage2_pred[:, 0]  # All negative
+                else:
+                    # Fallback: assume the column is for positive class
+                    stage2_proba = stage2_pred[:, 0]
+            else:
+                stage2_proba = stage2_pred[:, 1]
             final_proba[pass_stage1] = stage2_proba
 
         return np.column_stack([1 - final_proba, final_proba])
@@ -504,9 +520,11 @@ def create_two_stage_pipeline(
 if __name__ == "__main__":
     # Example usage and testing
     from sklearn.datasets import make_classification
+    from log_utils import setup_logging
+    setup_logging(log_prefix="two_stage_pipeline")
 
-    print("Two-Stage Pipeline Example")
-    print("=" * 50)
+    log.info("Two-Stage Pipeline Example")
+    log.info("=" * 50)
 
     # Create imbalanced dataset
     X, y = make_classification(
@@ -525,8 +543,8 @@ if __name__ == "__main__":
     X_train, y_train = X[train_idx], y[train_idx]
     X_test, y_test = X[test_idx], y[test_idx]
 
-    print(f"Train: {len(y_train)} samples, {np.sum(y_train)} positives ({np.mean(y_train):.2%})")
-    print(f"Test: {len(y_test)} samples, {np.sum(y_test)} positives ({np.mean(y_test):.2%})")
+    log.info(f"Train: {len(y_train)} samples, {np.sum(y_train)} positives ({np.mean(y_train):.2%})")
+    log.info(f"Test: {len(y_test)} samples, {np.sum(y_test)} positives ({np.mean(y_test):.2%})")
 
     # Create and fit pipeline
     pipeline = create_two_stage_pipeline(
@@ -546,9 +564,9 @@ if __name__ == "__main__":
     top_k_idx = np.argsort(y_proba)[-k:]
     p_at_k = np.mean(y_test[top_k_idx])
 
-    print(f"\nResults:")
-    print(f"  Average Precision: {ap:.4f}")
-    print(f"  Precision@{k}: {p_at_k:.2%}")
-    print(f"\nDiagnostics:")
+    log.info("Results:")
+    log.info(f"  Average Precision: {ap:.4f}")
+    log.info(f"  Precision@{k}: {p_at_k:.2%}")
+    log.info("Diagnostics:")
     for key, value in pipeline.get_diagnostic_info().items():
-        print(f"  {key}: {value:.4f}" if isinstance(value, float) else f"  {key}: {value}")
+        log.info(f"  {key}: {value:.4f}" if isinstance(value, float) else f"  {key}: {value}")

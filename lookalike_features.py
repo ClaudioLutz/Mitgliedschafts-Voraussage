@@ -9,13 +9,14 @@ Implements similarity-based features for B2B lead scoring:
 These features capture non-linear relationships that tree models may miss.
 """
 
-import logging
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 
-log = logging.getLogger(__name__)
+# --- Centralized logging
+from log_utils import get_logger
+log = get_logger(__name__)
 
 # Optional dependencies
 try:
@@ -525,10 +526,13 @@ def add_lookalike_features(
 
 
 if __name__ == "__main__":
+    from log_utils import setup_logging
+    setup_logging(log_prefix="lookalike_features")
+
     # Example usage
-    print("Lookalike Feature Engineering Module")
-    print(f"K-Prototypes available: {HAVE_KPROTOTYPES}")
-    print(f"FAISS available: {HAVE_FAISS}")
+    log.info("Lookalike Feature Engineering Module")
+    log.info(f"K-Prototypes available: {HAVE_KPROTOTYPES}")
+    log.info(f"FAISS available: {HAVE_FAISS}")
 
     # Create sample data for testing
     np.random.seed(42)
@@ -551,5 +555,5 @@ if __name__ == "__main__":
 
     transformer.fit(X, y)
     features = transformer.transform(X)
-    print(f"\nGenerated features: {list(features.columns)}")
-    print(features.head())
+    log.info(f"Generated features: {list(features.columns)}")
+    log.info(f"\n{features.head()}")

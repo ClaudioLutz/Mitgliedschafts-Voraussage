@@ -10,6 +10,11 @@ import pandas as pd
 from packaging.version import Version
 from sqlalchemy import create_engine, URL, text
 
+# --- Centralized logging
+from log_utils import setup_logging, get_logger
+setup_logging(log_prefix="time_estimate")
+log = get_logger(__name__)
+
 # --- scikit-learn bits
 from sklearn import __version__ as sklearn_version
 import os
@@ -152,17 +157,18 @@ ORDER BY NEWID();  -- random sample
     return pd.read_sql_query(text(q), engine, parse_dates=["snapshot_date", "Eintritt", "Austritt"])
 
 def main():
-    print("Connecting to DB…")
+    log.info("Connecting to DB...")
     engine = make_engine(SERVER, DATABASE)
 
-    print("Counting modeling rows (snapshots with complete labels)…")
+    log.info("Counting modeling rows (snapshots with complete labels)...")
     n_total = count_modeling_rows(engine, HORIZON_MONTHS)
     if n_total == 0:
+        log.error("No modeling rows found (check DB/table names and date ranges).")
         raise SystemExit("No modeling rows found (check DB/table names and date ranges).")
     n_sample = max(2_000, int(math.ceil(SAMPLE_FRACTION * n_total)))
-    print(f"Total modeling rows: {n_total:,}  |  Sampling: {n_sample:,} rows (~{100*SAMPLE_FRACTION:.1f}%)")
+    log.info(f"Total modeling rows: {n_total:,}  |  Sampling: {n_sample:,} rows (~{100*SAMPLE_FRACTION:.1f}%)")
 
-    print("Loading modeling SAMPLE from DB… (one-time)")
+    log.info("Loading modeling SAMPLE from DB... (one-time)")
     df = load_modeling_sample(engine, HORIZON_MONTHS, n_sample)
     df = df.sort_values("snapshot_date").reset_index(drop=True)
     df = temporal_feature_engineer(df)
@@ -173,7 +179,7 @@ def main():
 
     # Configure Pipeline based on backend
     if MODEL_BACKEND.startswith("xgb"):
-        print(f"Estimating time for backend: {MODEL_BACKEND.upper()}")
+        log.info(f"Estimating time for backend: {MODEL_BACKEND.upper()}")
         if not HAVE_XGBOOST:
             raise RuntimeError("XGBoost not installed.")
 
@@ -199,7 +205,7 @@ def main():
         pipe = Pipeline([("pre", pre), ("to_float", to_float), ("clf", clf)])
 
     elif MODEL_BACKEND.startswith("lgbm"):
-        print(f"Estimating time for backend: {MODEL_BACKEND.upper()}")
+        log.info(f"Estimating time for backend: {MODEL_BACKEND.upper()}")
         if not HAVE_LIGHTGBM:
             raise RuntimeError("LightGBM not installed.")
 
@@ -219,7 +225,7 @@ def main():
         pipe = Pipeline([("pre", pre), ("to_float", to_float), ("clf", clf)])
 
     elif MODEL_BACKEND == "dnn":
-        print("Estimating time for backend: DNN")
+        log.info("Estimating time for backend: DNN")
         try:
             from model_backends.dnn_classifier import make_dnn_estimator
         except Exception as exc:
@@ -241,7 +247,7 @@ def main():
         pipe = Pipeline([("pre", pre), ("to_float", to_float), ("clf", clf)])
 
     elif MODEL_BACKEND == "hgb_bagging":
-        print("Estimating time for backend: HGB BalancedBagging")
+        log.info("Estimating time for backend: HGB BalancedBagging")
         if not HAVE_IMBLEARN_ENSEMBLE:
             raise RuntimeError("imbalanced-learn not installed for BalancedBagging.")
 
@@ -263,7 +269,7 @@ def main():
         pipe = Pipeline([("pre", pre), ("clf", bagger)])
 
     else:
-        print("Estimating time for backend: HGB (Legacy)")
+        log.info("Estimating time for backend: HGB (Legacy)")
         pre = create_lead_gen_preprocessor(onehot_sparse=False)
 
         # Pick ONE imbalance strategy: class_weight if available in this sklearn, else none (since this is only a probe)
@@ -276,7 +282,7 @@ def main():
         )
         pipe = Pipeline([("pre", pre), ("clf", clf)])
 
-    print("Timing ONE fit on the sample…")
+    log.info("Timing ONE fit on the sample...")
     t0 = time.time()
     pipe.fit(X, y)
     t1 = time.time()
@@ -287,14 +293,14 @@ def main():
     total_fits = N_ITER * N_SPLITS + 1 + CAL_SPLITS
     est_total_minutes = est_minutes_per_full_fit * total_fits
 
-    print("\n--- ESTIMATE ---")
-    print(f"Sample rows: {len(X):,} | Minutes per fit on sample: ~{minutes_per_fit_on_sample:.2f}")
-    print(f"Scale factor to full dataset: x{scale:.1f}")
-    print(f"Estimated minutes per FULL fit: ~{est_minutes_per_full_fit:.1f}")
-    print(f"Total fits ≈ N_ITER*N_SPLITS + 1 + CAL_SPLITS = {N_ITER}*{N_SPLITS} + 1 + {CAL_SPLITS} = {total_fits}")
-    print(f"Estimated TOTAL runtime: ~{est_total_minutes:.0f} minutes")
-    print("----------------")
-    print("Note: This is a ballpark. If you change N_ITER/N_SPLITS/CAL_SPLITS or data size, re-run this script.")
+    log.info("--- ESTIMATE ---")
+    log.info(f"Sample rows: {len(X):,} | Minutes per fit on sample: ~{minutes_per_fit_on_sample:.2f}")
+    log.info(f"Scale factor to full dataset: x{scale:.1f}")
+    log.info(f"Estimated minutes per FULL fit: ~{est_minutes_per_full_fit:.1f}")
+    log.info(f"Total fits = N_ITER*N_SPLITS + 1 + CAL_SPLITS = {N_ITER}*{N_SPLITS} + 1 + {CAL_SPLITS} = {total_fits}")
+    log.info(f"Estimated TOTAL runtime: ~{est_total_minutes:.0f} minutes")
+    log.info("----------------")
+    log.info("Note: This is a ballpark. If you change N_ITER/N_SPLITS/CAL_SPLITS or data size, re-run this script.")
 
 if __name__ == "__main__":
     main()

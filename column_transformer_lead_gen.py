@@ -3,13 +3,12 @@ Lead-Gen Oriented ColumnTransformer Implementation
 ==================================================
 Implements the exact preprocessing strategy specified for membership prediction:
 - Numeric features with missing indicators
-- Ordinal features as integers  
+- Ordinal features as integers
 - Low-cardinality → One-Hot Encoding
 - High-cardinality → Target Encoding with cross-fitting
 - Feature engineering (Company_Age_Years, missing flags, PLZ grouping)
 """
 
-import logging
 import pandas as pd
 import numpy as np
 import scipy.sparse as sp
@@ -18,7 +17,9 @@ from sklearn.pipeline import Pipeline, FunctionTransformer
 from sklearn.preprocessing import OneHotEncoder, PowerTransformer, FunctionTransformer
 from sklearn.impute import SimpleImputer
 
-log = logging.getLogger(__name__)
+# --- Centralized logging
+from log_utils import get_logger
+log = get_logger(__name__)
 
 # TargetEncoder: prefer sklearn (has internal cross-fitting); fallback to category_encoders
 try:
@@ -484,10 +485,13 @@ def validate_preprocessor(df_sample, target_col='Target', onehot_sparse=False):
     return results
 
 if __name__ == "__main__":
+    from log_utils import setup_logging
+    setup_logging(log_prefix="column_transformer")
+
     # Example usage
     preprocessor = create_lead_gen_preprocessor()
-    print("Lead-Gen ColumnTransformer created successfully!")
-    print(f"Numeric columns: {NUMERIC_COLS}")
-    print(f"Ordinal columns: {ORDINAL_COLS}")
-    print(f"Low-card categorical: {LOW_CARD_CATEGORICAL_COLS}")
-    print(f"High-card categorical: {HIGH_CARD_CATEGORICAL_COLS}")
+    log.info("Lead-Gen ColumnTransformer created successfully!")
+    log.info(f"Numeric columns: {NUMERIC_COLS}")
+    log.info(f"Ordinal columns: {ORDINAL_COLS}")
+    log.info(f"Low-card categorical: {LOW_CARD_CATEGORICAL_COLS}")
+    log.info(f"High-card categorical: {HIGH_CARD_CATEGORICAL_COLS}")

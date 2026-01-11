@@ -11,6 +11,11 @@ from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
 
+# --- Centralized logging
+from log_utils import setup_logging, get_logger
+setup_logging(log_prefix="data_analysis")
+log = get_logger(__name__)
+
 # Import the database connection and function from the main script
 from training_lead_generation_model import make_engine, load_current_snapshot, SERVER, DATABASE
 
@@ -228,25 +233,25 @@ def main():
     """
     Main execution function
     """
-    print("🔄 Connecting to database...")
+    log.info("Connecting to database...")
     try:
         engine = make_engine(SERVER, DATABASE)
-        print("✅ Database connection successful")
-        
-        print("📥 Loading current snapshot data...")
+        log.info("Database connection successful")
+
+        log.info("Loading current snapshot data...")
         df = load_current_snapshot(engine)
-        print(f"✅ Data loaded successfully: {len(df):,} rows")
-        
+        log.info(f"Data loaded successfully: {len(df):,} rows")
+
         # Perform comprehensive analysis
         analyzed_df = comprehensive_data_analysis(df)
-        
-        print(f"\n🎉 Analysis complete!")
-        print(f"📁 Check the './outputs' directory for detailed statistics files")
-        
+
+        log.info("Analysis complete!")
+        log.info("Check the './outputs' directory for detailed statistics files")
+
         return analyzed_df
-        
+
     except Exception as e:
-        print(f"❌ Error during analysis: {str(e)}")
+        log.error(f"Error during analysis: {str(e)}")
         import traceback
         traceback.print_exc()
         return None

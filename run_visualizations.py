@@ -9,7 +9,6 @@ ROC curves, confusion matrices, and more.
 
 import os
 import sys
-import logging
 from datetime import datetime
 
 import numpy as np
@@ -21,9 +20,10 @@ from joblib import load
 import warnings
 warnings.filterwarnings('ignore')
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger(__name__)
+# --- Centralized logging
+from log_utils import setup_logging, get_logger
+setup_logging(log_prefix="visualizations")
+log = get_logger(__name__)
 
 # Import the visualization functions
 from visualize_lead_model import make_all_viz

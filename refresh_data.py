@@ -3,11 +3,11 @@ import numpy as np
 import json
 import os
 from datetime import datetime
-import logging
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger(__name__)
+# --- Centralized logging
+from log_utils import setup_logging, get_logger
+setup_logging(log_prefix="refresh_data")
+log = get_logger(__name__)
 
 DATA_DIR = "static/data"
 STATUS_FILE = "static/status.json"

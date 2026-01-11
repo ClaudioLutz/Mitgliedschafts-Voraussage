@@ -41,6 +41,10 @@ from sklearn.metrics import (
 from sklearn.inspection import permutation_importance
 from sklearn.calibration import calibration_curve, CalibrationDisplay
 
+# --- Centralized logging
+from log_utils import get_logger
+log = get_logger(__name__)
+
 # Try SHAP import
 try:
     import shap
@@ -404,7 +408,7 @@ def plot_shap(
     shap_sample: int = 1000
 ) -> None:
     if not _HAS_SHAP:
-        print("SHAP not installed; skipping SHAP plots.")
+        log.warning("SHAP not installed; skipping SHAP plots.")
         return
 
     pre, final = _split_pipeline(estimator)
@@ -493,7 +497,7 @@ def plot_shap(
         plt.savefig(os.path.join(figures_dir, "shap_waterfall_idx0.png"), dpi=180)
         plt.close()
     except Exception as e:
-        print(f"Waterfall plot skipped: {e}")
+        log.debug(f"Waterfall plot skipped: {e}")
 
 
 def plot_confusion_and_roc(
@@ -540,7 +544,7 @@ def plot_calibration_and_gains(
     _, y_prob = _predict_scores(estimator, X_test)
 
     if y_prob is None:
-        print("No predicted probabilities available; calibration/gains will use normalized scores.")
+        log.warning("No predicted probabilities available; calibration/gains will use normalized scores.")
         y_score, _ = _predict_scores(estimator, X_test)
         # Rank-transform to pseudo-probabilities for visualization
         ranks = pd.Series(y_score).rank(method="average") / len(y_score)
@@ -577,10 +581,10 @@ def plot_calibration_and_gains(
     plt.savefig(os.path.join(figures_dir, "gains_and_lift.png"), dpi=180)
     plt.close()
 
-    # Also print a small gains table to console
-    print("\nTop-decile snapshot:")
-    print(gains.head(3))
-    print("\nFull gains table:\n", gains)
+    # Also log a small gains table
+    log.info("Top-decile snapshot:")
+    log.info(f"\n{gains.head(3)}")
+    log.debug(f"Full gains table:\n{gains}")
 
 
 # ----------------------------- Orchestrator ----------------------------- #
@@ -601,7 +605,7 @@ def make_all_viz(
     _ensure_dir(figures_dir)
 
     # 1) Feature importance (transformed + aggregated)
-    print(">> Building feature importance plots …")
+    log.info("Building feature importance plots...")
     plot_feature_importance(
         estimator=estimator,
         X_test=X_test,
@@ -611,7 +615,7 @@ def make_all_viz(
     )
 
     # 2) SHAP explanations (summary + 1 waterfall)
-    print(">> Building SHAP plots …")
+    log.info("Building SHAP plots...")
     try:
         plot_shap(
             estimator=estimator,
@@ -621,10 +625,10 @@ def make_all_viz(
             shap_sample=shap_sample
         )
     except Exception as e:
-        print(f"SHAP failed with error '{e}'. Skipping SHAP plots.")
+        log.warning(f"SHAP failed with error '{e}'. Skipping SHAP plots.")
 
     # 3) Confusion matrix + ROC
-    print(">> Building confusion matrix and ROC …")
+    log.info("Building confusion matrix and ROC...")
     plot_confusion_and_roc(
         estimator=estimator,
         X_test=X_test,
@@ -633,7 +637,7 @@ def make_all_viz(
     )
 
     # 4) Calibration + Gains/Lift
-    print(">> Building calibration curve and gains/lift …")
+    log.info("Building calibration curve and gains/lift...")
     plot_calibration_and_gains(
         estimator=estimator,
         X_test=X_test,
@@ -641,4 +645,4 @@ def make_all_viz(
         figures_dir=figures_dir
     )
 
-    print(f"\nAll figures saved to: {os.path.abspath(figures_dir)}")
+    log.info(f"All figures saved to: {os.path.abspath(figures_dir)}")

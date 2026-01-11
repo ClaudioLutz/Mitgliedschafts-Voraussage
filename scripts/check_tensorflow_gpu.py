@@ -1,42 +1,48 @@
-
 import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from log_utils import setup_logging, get_logger
+setup_logging(log_prefix="tensorflow_gpu_check")
+log = get_logger(__name__)
+
 
 def check_tensorflow_gpu():
     try:
         import tensorflow as tf
     except ImportError as e:
-        print(f"FAILURE: TensorFlow not installed. Error: {e}")
-        print("Install with: pip install tensorflow")
+        log.error(f"FAILURE: TensorFlow not installed. Error: {e}")
+        log.info("Install with: pip install tensorflow")
         return False
 
-    print(f"TensorFlow version: {tf.__version__}")
+    log.info(f"TensorFlow version: {tf.__version__}")
 
     # Check for available GPUs
     gpus = tf.config.list_physical_devices('GPU')
-    print(f"Number of GPUs detected: {len(gpus)}")
+    log.info(f"Number of GPUs detected: {len(gpus)}")
 
     if not gpus:
-        print("WARNING: No GPUs detected. TensorFlow will run on CPU only.")
-        print("Possible reasons:")
-        print("  - No NVIDIA GPU installed")
-        print("  - CUDA toolkit not installed")
-        print("  - cuDNN not installed")
-        print("  - GPU not visible to TensorFlow")
+        log.warning("No GPUs detected. TensorFlow will run on CPU only.")
+        log.info("Possible reasons:")
+        log.info("  - No NVIDIA GPU installed")
+        log.info("  - CUDA toolkit not installed")
+        log.info("  - cuDNN not installed")
+        log.info("  - GPU not visible to TensorFlow")
         return False
 
     # Print GPU details
     for i, gpu in enumerate(gpus):
-        print(f"GPU {i}: {gpu.name}")
+        log.info(f"GPU {i}: {gpu.name}")
         try:
             gpu_details = tf.config.experimental.get_device_details(gpu)
             if gpu_details:
-                print(f"  Details: {gpu_details}")
+                log.info(f"  Details: {gpu_details}")
         except Exception:
             pass
 
     # Test GPU computation
     try:
-        print("\nAttempting simple GPU computation...")
+        log.info("Attempting simple GPU computation...")
 
         # Enable memory growth to avoid allocating all GPU memory
         for gpu in gpus:
@@ -49,10 +55,10 @@ def check_tensorflow_gpu():
             c = tf.matmul(a, b)
             result = c.numpy()
 
-        print(f"GPU computation successful! Result:\n{result}")
+        log.info(f"GPU computation successful! Result:\n{result}")
 
         # Test with a simple model
-        print("\nAttempting to train a simple model on GPU...")
+        log.info("Attempting to train a simple model on GPU...")
         model = tf.keras.Sequential([
             tf.keras.layers.Dense(10, activation='relu', input_shape=(5,)),
             tf.keras.layers.Dense(1, activation='sigmoid')
@@ -67,19 +73,20 @@ def check_tensorflow_gpu():
         # Train for 1 epoch as a test
         model.fit(X, y, epochs=1, verbose=0)
 
-        print("SUCCESS: TensorFlow is properly configured for GPU training!")
-        print(f"\nCUDA Version (built with): {tf.sysconfig.get_build_info().get('cuda_version', 'unknown')}")
-        print(f"cuDNN Version (built with): {tf.sysconfig.get_build_info().get('cudnn_version', 'unknown')}")
+        log.info("SUCCESS: TensorFlow is properly configured for GPU training!")
+        log.info(f"CUDA Version (built with): {tf.sysconfig.get_build_info().get('cuda_version', 'unknown')}")
+        log.info(f"cuDNN Version (built with): {tf.sysconfig.get_build_info().get('cudnn_version', 'unknown')}")
 
         return True
 
     except Exception as e:
-        print(f"FAILURE: GPU computation failed. Error: {e}")
-        print("\nTroubleshooting:")
-        print("  - Ensure CUDA toolkit is installed and compatible with TensorFlow")
-        print("  - Ensure cuDNN is installed and compatible with TensorFlow")
-        print(f"  - Check TensorFlow GPU compatibility at: https://www.tensorflow.org/install/source#gpu")
+        log.error(f"FAILURE: GPU computation failed. Error: {e}")
+        log.info("Troubleshooting:")
+        log.info("  - Ensure CUDA toolkit is installed and compatible with TensorFlow")
+        log.info("  - Ensure cuDNN is installed and compatible with TensorFlow")
+        log.info("  - Check TensorFlow GPU compatibility at: https://www.tensorflow.org/install/source#gpu")
         return False
+
 
 if __name__ == "__main__":
     if check_tensorflow_gpu():

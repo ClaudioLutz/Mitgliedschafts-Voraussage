@@ -36,73 +36,13 @@ from sklearn.pipeline import Pipeline
 from sklearn.utils.class_weight import compute_class_weight
 
 # --------------------
-# Extensive Logging setup
+# Centralized Logging setup
 # --------------------
-import time
-from functools import wraps
+from log_utils import setup_logging, get_logger, log_execution, log_memory_usage
 
-# Create a custom logger
-log = logging.getLogger(__name__)
-log.setLevel(logging.DEBUG)  # Capture everything
-
-# Create handlers
-c_handler = logging.StreamHandler() # Console
-f_handler = logging.FileHandler(f'training_run_{datetime.now().strftime("%Y%m%d_%H%M")}.log') # File
-
-# Create formatters and add it to handlers
-# We add milliseconds (%(msecs)03d) to see if steps are hanging quickly
-log_format = logging.Formatter('%(asctime)s.%(msecs)03d [%(levelname)s] %(funcName)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-c_handler.setFormatter(log_format)
-f_handler.setFormatter(log_format)
-
-# Add handlers to the logger
-# Avoid adding handlers multiple times if script is re-run in interactive env
-if not log.hasHandlers():
-    log.addHandler(c_handler)
-    log.addHandler(f_handler)
-if log.handlers:
-    log.propagate = False
-
-# Attach handlers to root so logs from other modules are captured.
-root_logger = logging.getLogger()
-if not root_logger.hasHandlers():
-    root_logger.addHandler(c_handler)
-    root_logger.addHandler(f_handler)
-root_logger.setLevel(logging.DEBUG)
-
-# --------------------
-# Helper: Execution Timer Decorator
-# --------------------
-def log_execution(func):
-    """Decorator to log start, end, and duration of functions automatically."""
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        log.info(f"🟢 START: {func.__name__}")
-        start_time = time.time()
-        try:
-            result = func(*args, **kwargs)
-            end_time = time.time()
-            duration = end_time - start_time
-            
-            # If result is a DataFrame/Array, log its shape
-            meta = ""
-            if hasattr(result, 'shape'):
-                meta = f" | Output Shape: {result.shape}"
-            elif isinstance(result, (list, tuple)):
-                meta = f" | Output Len: {len(result)}"
-                
-            log.info(f"✅ FINISHED: {func.__name__} in {duration:.2f}s{meta}")
-            return result
-        except Exception as e:
-            log.error(f"❌ FAILED: {func.__name__} after {time.time() - start_time:.2f}s with error: {str(e)}")
-            raise e
-    return wrapper
-
-
-def log_memory_usage(tag=""):
-    process = psutil.Process(os.getpid())
-    mem_gb = process.memory_info().rss / 1024 / 1024 / 1024
-    log.info(f"💾 RAM USAGE [{tag}]: {mem_gb:.2f} GB")
+# Setup logging with training-specific prefix
+setup_logging(log_level=logging.DEBUG, log_prefix="training_run")
+log = get_logger(__name__)
 
 warnings.filterwarnings("ignore")
 
